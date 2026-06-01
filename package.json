@@ -2,16 +2,48 @@
   "name": "ci4u-brains",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "24.x"
+  },
+  "overrides": {
+    "postcss": "8.5.15"
+  },
+  "workspaces": [
+    "apps/api"
+  ],
   "scripts": {
     "dev": "next dev",
+    "dev:web": "next dev",
+    "dev:web:lan": "next dev -H 0.0.0.0 -p 3001",
+    "dev:api": "npm run dev --workspace @ci4u/api",
     "build": "next build",
+    "build:web": "next build",
+    "build:api": "npm run build --workspace @ci4u/api",
     "start": "next start",
-    "lint": "eslint"
+    "start:web:lan": "next start -H 0.0.0.0 -p 3001",
+    "start:api": "npm run start --workspace @ci4u/api",
+    "lint": "eslint",
+    "smoke:api": "node scripts/smoke-api.mjs",
+    "smoke:web": "node scripts/smoke-web-cdp.mjs",
+    "check:deployment": "node scripts/require-api-production-env.mjs --check-render-blueprint",
+    "check:hosted": "node scripts/hosted-deployment-preflight.mjs",
+    "supabase:check": "node scripts/supabase-db-check.mjs",
+    "supabase:migrate": "node scripts/with-supabase-db.mjs npm run prisma:migrate:deploy",
+    "supabase:api": "node scripts/with-supabase-db.mjs npm run start:api",
+    "test:api": "npm run test --workspace @ci4u/api",
+    "typecheck:api": "npm run typecheck --workspace @ci4u/api",
+    "prisma:generate": "npm run prisma:generate --workspace @ci4u/api",
+    "prisma:migrate:deploy": "npm run prisma:migrate:deploy --workspace @ci4u/api",
+    "prisma:validate": "npm run prisma:validate --workspace @ci4u/api",
+    "check:all": "npm run lint && npm run build && npm run typecheck:api && npm run build:api && npm run test:api && npm run prisma:validate"
   },
   "dependencies": {
+    "lucide-react": "^1.16.0",
     "next": "16.2.6",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "read-excel-file": "^9.0.10",
+    "recharts": "^3.8.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

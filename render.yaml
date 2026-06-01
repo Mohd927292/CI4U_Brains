@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: ci4u-brains-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build:api
+    startCommand: node scripts/require-api-production-env.mjs && npm run prisma:migrate:deploy && npm run start:api
+    healthCheckPath: /v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CI4U_REPOSITORY
+        value: prisma
+      - key: CI4U_DATA_SCOPE
+        sync: false
+      - key: CI4U_AUTH_MODE
+        sync: false
+      - key: CI4U_WEB_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CI4U_AUTH_JWKS_URL
+        sync: false
+      - key: CI4U_AUTH_ISSUER
+        sync: false
+      - key: CI4U_AUTH_AUDIENCE
+        sync: false

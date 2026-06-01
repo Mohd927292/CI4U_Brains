@@ -1,0 +1,629 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum DataScope {
+  DEVELOPMENT
+  PRODUCTION
+}
+
+enum LeadStage {
+  RAW_UNTOUCHED
+  CONTACT_ATTEMPTED
+  WARM
+  HOT_INSTALLATION
+  HOT_REPAIR_SERVICE
+  HOT_AMC
+  QUOTATION_PENDING
+  SITE_VISIT_PENDING
+  CAPTURED_WON
+  VENDOR_ASSIGNMENT
+  VENDOR_OFFER_SENT
+  VENDOR_ACCEPTED
+  OPERATIONS_ONGOING
+  ACTIVE_JOB
+  COMPLETED
+  LOST
+  NOT_INTERESTED
+  WRONG_NUMBER
+  NOT_RECEIVING
+  GHOSTING
+  NOT_RECEIVING_FINAL
+  TRASH_ARCHIVED
+}
+
+enum LeadIntent {
+  UNKNOWN
+  WARM
+  INSTALLATION
+  REPAIR_SERVICE
+}
+
+enum LeadPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ActivityType {
+  LEAD_IMPORTED
+  LEAD_CREATED
+  DUPLICATE_DETECTED
+  CALL_ATTEMPTED
+  CALL_CONNECTED
+  CALL_OUTCOME
+  FOLLOW_UP_SCHEDULED
+  FOLLOW_UP_COMPLETED
+  STAGE_CHANGED
+  INTENT_CHANGED
+  WHATSAPP_GENERATED
+  WHATSAPP_SENT_MANUAL
+  ARCHIVED
+  REACTIVATED
+  NOTE_ADDED
+  WON_MARKED
+}
+
+enum FollowUpReason {
+  NURTURE
+  SITE_VISIT
+  QUOTATION
+  WON
+}
+
+enum SiteVisitScheduleStatus {
+  SCHEDULED
+  NOT_SCHEDULED
+}
+
+enum WorkScheduleStatus {
+  SCHEDULED
+  NOT_SCHEDULED
+}
+
+enum FollowUpStatus {
+  OPEN
+  COMPLETED
+  MISSED
+  CANCELLED
+}
+
+enum ArchiveCategory {
+  NOT_INTERESTED
+  WRONG_NUMBER
+  NOT_RECEIVING_FINAL
+  LOST
+  OLD_WARM
+  OLD_COMPLETED
+  DUPLICATE
+  MANUALLY_ARCHIVED
+}
+
+enum ImportBatchStatus {
+  UPLOADED
+  PREVIEWED
+  IMPORTED
+  FAILED
+  CANCELLED
+}
+
+enum ImportRowStatus {
+  NEW_VALID
+  DUPLICATE_IN_FILE
+  DUPLICATE_ACTIVE
+  DUPLICATE_ARCHIVED
+  DUPLICATE_COMPLETED
+  INVALID_PHONE
+  MISSING_NAME
+  IMPORTED
+  IGNORED
+  FAILED
+}
+
+enum WhatsAppMessageStatus {
+  DRAFT
+  COPIED
+  OPENED_WHATSAPP
+  SENT_MANUAL_CONFIRMED
+  FAILED
+}
+
+enum NotificationPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model User {
+  id            String       @id @default(cuid())
+  authProvider String?      @map("auth_provider")
+  authSubject  String?      @map("auth_subject")
+  name          String
+  phone         String?
+  email         String?
+  dataScope     DataScope    @default(DEVELOPMENT) @map("data_scope")
+  status        UserStatus   @default(INVITED)
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  roles              UserRole[]
+  assignedLeads      Lead[]             @relation("LeadAssignee")
+  createdActivities  LeadActivity[]     @relation("LeadActivityCreator")
+  assignedFollowUps  FollowUp[]         @relation("FollowUpAssignee")
+  uploadedImports    ImportBatch[]      @relation("ImportUploader")
+  notifications      Notification[]
+  auditLogs          AuditLog[]         @relation("AuditActor")
+  archivedRecords    ArchiveRecord[]    @relation("ArchiveActor")
+  reactivatedRecords ArchiveRecord[]    @relation("ReactivationActor")
+
+  @@unique([dataScope, authSubject])
+  @@unique([dataScope, email])
+  @@map("users")
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model UserRole {
+  userId    String   @map("user_id")
+  roleId    String   @map("role_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       String   @map("role_id")
+  permissionId String   @map("permission_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+model Customer {
+  id                     String   @id @default(cuid())
+  dataScope              DataScope @default(DEVELOPMENT) @map("data_scope")
+  primaryPhoneNormalized String   @map("primary_phone_normalized")
+  businessName           String   @map("business_name")
+  contactPerson          String?  @map("contact_person")
+  alternatePhones        Json     @default("[]") @map("alternate_phones")
+  address                String?
+  area                   String?
+  pincode                String?
+  city                   String?
+  lifetimeValue          Decimal  @default(0) @map("lifetime_value") @db.Decimal(12, 2)
+  totalJobs              Int      @default(0) @map("total_jobs")
+  lastInteractionAt      DateTime? @map("last_interaction_at")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+
+  phoneEntries     PhoneIndex[]
+  leads            Lead[]
+  activities       LeadActivity[]
+  followUps        FollowUp[]
+  whatsappMessages WhatsAppMessage[]
+  quotations       LeadQuotation[]
+  wonLeadDetails   WonLeadDetails[]
+  notifications    Notification[]
+  archives         ArchiveRecord[]
+
+  @@index([dataScope, businessName])
+  @@index([area, pincode])
+  @@map("customers")
+}
+
+model PhoneIndex {
+  id              String    @id @default(cuid())
+  dataScope       DataScope @default(DEVELOPMENT) @map("data_scope")
+  phoneNormalized String    @map("phone_normalized")
+  customerId      String    @map("customer_id")
+  currentLeadId   String?   @unique @map("current_lead_id")
+  currentStage    LeadStage @default(RAW_UNTOUCHED) @map("current_stage")
+  isPrimary        Boolean   @default(true) @map("is_primary")
+  isActive         Boolean   @default(true) @map("is_active")
+  isArchived       Boolean   @default(false) @map("is_archived")
+  lastUpdatedAt    DateTime  @updatedAt @map("last_updated_at")
+
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  currentLead Lead?    @relation("CurrentLeadPhoneIndex", fields: [currentLeadId], references: [id], onDelete: SetNull)
+
+  @@unique([dataScope, phoneNormalized])
+  @@index([customerId])
+  @@index([isActive, isArchived])
+  @@map("phone_index")
+}
+
+model Lead {
+  id                 String       @id @default(cuid())
+  dataScope          DataScope    @default(DEVELOPMENT) @map("data_scope")
+  customerId         String       @map("customer_id")
+  leadCycleNumber    Int          @map("lead_cycle_number")
+  source             String
+  currentStage       LeadStage    @default(RAW_UNTOUCHED) @map("current_stage")
+  currentIntent      LeadIntent   @default(UNKNOWN) @map("current_intent")
+  assignedToId       String?      @map("assigned_to_id")
+  priority           LeadPriority @default(MEDIUM)
+  lastCallAt         DateTime?    @map("last_call_at")
+  nextFollowUpAt     DateTime?    @map("next_follow_up_at")
+  followUpReason     FollowUpReason? @map("follow_up_reason")
+  siteVisitStatus    SiteVisitScheduleStatus? @map("site_visit_status")
+  siteVisitScheduledAt DateTime?   @map("site_visit_scheduled_at")
+  notReceivingCount  Int          @default(0) @map("not_receiving_count")
+  spokenCount        Int          @default(0) @map("spoken_count")
+  isArchived         Boolean      @default(false) @map("is_archived")
+  archiveCategory    ArchiveCategory? @map("archive_category")
+  createdAt          DateTime     @default(now()) @map("created_at")
+  updatedAt          DateTime     @updatedAt @map("updated_at")
+
+  customer       Customer          @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  assignedTo     User?             @relation("LeadAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  currentPhone   PhoneIndex?       @relation("CurrentLeadPhoneIndex")
+  activities     LeadActivity[]
+  followUps      FollowUp[]
+  whatsapp       WhatsAppMessage[]
+  quotations     LeadQuotation[]
+  wonDetails     WonLeadDetails?
+  archives       ArchiveRecord[]
+  importRows     ImportRow[]
+
+  @@unique([customerId, leadCycleNumber])
+  @@index([dataScope, currentStage, nextFollowUpAt])
+  @@index([customerId, currentStage, isArchived])
+  @@index([assignedToId, currentStage, nextFollowUpAt])
+  @@map("leads")
+}
+
+model LeadActivity {
+  id          String       @id @default(cuid())
+  dataScope   DataScope    @default(DEVELOPMENT) @map("data_scope")
+  leadId      String       @map("lead_id")
+  customerId  String       @map("customer_id")
+  type        ActivityType
+  oldStage    LeadStage?   @map("old_stage")
+  newStage    LeadStage?   @map("new_stage")
+  oldIntent   LeadIntent?  @map("old_intent")
+  newIntent   LeadIntent?  @map("new_intent")
+  summary     String?
+  metadata    Json         @default("{}")
+  createdById String?      @map("created_by_id")
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  createdBy User?    @relation("LeadActivityCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([dataScope, leadId, createdAt])
+  @@index([leadId])
+  @@index([customerId, createdAt])
+  @@index([createdById])
+  @@map("lead_activities")
+}
+
+model FollowUp {
+  id          String         @id @default(cuid())
+  dataScope   DataScope      @default(DEVELOPMENT) @map("data_scope")
+  leadId      String         @map("lead_id")
+  customerId  String         @map("customer_id")
+  dueAt       DateTime       @map("due_at")
+  reason      String
+  priority    LeadPriority   @default(MEDIUM)
+  status      FollowUpStatus @default(OPEN)
+  assignedToId String?       @map("assigned_to_id")
+  completedAt DateTime?      @map("completed_at")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  lead       Lead     @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  assignedTo User?    @relation("FollowUpAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  @@index([dataScope, assignedToId, dueAt, status])
+  @@index([leadId, status])
+  @@index([customerId])
+  @@index([assignedToId])
+  @@map("follow_ups")
+}
+
+model WhatsAppMessage {
+  id            String                @id @default(cuid())
+  dataScope     DataScope             @default(DEVELOPMENT) @map("data_scope")
+  leadId        String                @map("lead_id")
+  customerId    String                @map("customer_id")
+  phone         String
+  messageBody   String                @map("message_body")
+  messageType   String                @map("message_type")
+  generatedBy   String                @map("generated_by")
+  editedByUser  Boolean               @default(false) @map("edited_by_user")
+  status        WhatsAppMessageStatus @default(DRAFT)
+  sentAt        DateTime?             @map("sent_at")
+  sentById      String?               @map("sent_by_id")
+  failureReason String?               @map("failure_reason")
+  apiMessageId  String?               @map("api_message_id")
+  createdAt     DateTime              @default(now()) @map("created_at")
+
+  lead     Lead     @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@index([dataScope, leadId, createdAt])
+  @@index([leadId])
+  @@index([customerId, createdAt])
+  @@map("whatsapp_messages")
+}
+
+model QuotationItem {
+  id             String    @id @default(cuid())
+  dataScope      DataScope @default(DEVELOPMENT) @map("data_scope")
+  itemName       String    @map("item_name")
+  lastPricePaise Int       @default(0) @map("last_price_paise")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  templateItems QuotationPackageTemplateItem[]
+
+  @@unique([dataScope, itemName])
+  @@index([dataScope, itemName])
+  @@map("quotation_items")
+}
+
+model QuotationPackageTemplate {
+  id          String    @id @default(cuid())
+  dataScope   DataScope @default(DEVELOPMENT) @map("data_scope")
+  packageName String    @map("package_name")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  items QuotationPackageTemplateItem[]
+
+  @@unique([dataScope, packageName])
+  @@index([dataScope, packageName])
+  @@map("quotation_package_templates")
+}
+
+model QuotationPackageTemplateItem {
+  templateId     String   @map("template_id")
+  quotationItemId String  @map("quotation_item_id")
+  unitPricePaise Int      @map("unit_price_paise")
+  quantity       Int      @default(1)
+  sortOrder      Int      @default(0) @map("sort_order")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  template      QuotationPackageTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  quotationItem QuotationItem            @relation(fields: [quotationItemId], references: [id], onDelete: Cascade)
+
+  @@id([templateId, quotationItemId])
+  @@index([quotationItemId])
+  @@map("quotation_package_template_items")
+}
+
+model LeadQuotation {
+  id              String    @id @default(cuid())
+  dataScope       DataScope @default(DEVELOPMENT) @map("data_scope")
+  leadId          String    @map("lead_id")
+  customerId      String    @map("customer_id")
+  title           String
+  totalPricePaise Int       @map("total_price_paise")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  lead     Lead                   @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  customer Customer               @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  packages LeadQuotationPackage[]
+
+  @@index([dataScope, leadId, createdAt])
+  @@index([leadId])
+  @@index([customerId, createdAt])
+  @@map("lead_quotations")
+}
+
+model LeadQuotationPackage {
+  id                String @id @default(cuid())
+  quotationId       String @map("quotation_id")
+  packageName       String @map("package_name")
+  multiplier        Int    @default(1)
+  packageTotalPaise Int    @map("package_total_paise")
+  sortOrder         Int    @default(0) @map("sort_order")
+
+  quotation LeadQuotation       @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  items     LeadQuotationItem[]
+
+  @@index([quotationId, sortOrder])
+  @@map("lead_quotation_packages")
+}
+
+model LeadQuotationItem {
+  id              String @id @default(cuid())
+  packageId       String @map("package_id")
+  itemName        String @map("item_name")
+  unitPricePaise  Int    @map("unit_price_paise")
+  quantity        Int    @default(1)
+  lineTotalPaise  Int    @map("line_total_paise")
+  sortOrder       Int    @default(0) @map("sort_order")
+
+  package LeadQuotationPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+
+  @@index([packageId, sortOrder])
+  @@map("lead_quotation_items")
+}
+
+model WonLeadDetails {
+  id                            String             @id @default(cuid())
+  dataScope                     DataScope          @default(DEVELOPMENT) @map("data_scope")
+  leadId                        String             @unique @map("lead_id")
+  customerId                    String             @map("customer_id")
+  siteContactNumber             String             @map("site_contact_number")
+  useCustomerPhoneAsSiteContact Boolean            @default(false) @map("use_customer_phone_as_site_contact")
+  address                       String
+  scopeOfWork                   String             @map("scope_of_work")
+  scheduleStatus                WorkScheduleStatus @map("schedule_status")
+  scheduledAt                   DateTime?          @map("scheduled_at")
+  quotedPricePaise              Int                @map("quoted_price_paise")
+  acceptedPricePaise            Int                @map("accepted_price_paise")
+  advancePaymentPaise           Int                @default(0) @map("advance_payment_paise")
+  createdAt                     DateTime           @default(now()) @map("created_at")
+  updatedAt                     DateTime           @updatedAt @map("updated_at")
+
+  lead     Lead     @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@index([dataScope, customerId])
+  @@index([customerId])
+  @@map("won_lead_details")
+}
+
+model Notification {
+  id         String               @id @default(cuid())
+  dataScope  DataScope            @default(DEVELOPMENT) @map("data_scope")
+  userId     String               @map("user_id")
+  customerId String?              @map("customer_id")
+  type       String
+  priority   NotificationPriority @default(MEDIUM)
+  title      String
+  message    String
+  relatedId  String?              @map("related_id")
+  read       Boolean              @default(false)
+  createdAt  DateTime             @default(now()) @map("created_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([dataScope, userId, read, createdAt])
+  @@index([userId])
+  @@index([customerId])
+  @@map("notifications")
+}
+
+model ArchiveRecord {
+  id            String          @id @default(cuid())
+  dataScope     DataScope       @default(DEVELOPMENT) @map("data_scope")
+  leadId        String          @map("lead_id")
+  customerId    String          @map("customer_id")
+  category      ArchiveCategory
+  month         Int
+  year          Int
+  archivedAt    DateTime        @default(now()) @map("archived_at")
+  archivedById  String?         @map("archived_by_id")
+  reason        String
+  reactivatedAt DateTime?       @map("reactivated_at")
+  reactivatedById String?       @map("reactivated_by_id")
+
+  lead          Lead     @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  archivedBy    User?    @relation("ArchiveActor", fields: [archivedById], references: [id], onDelete: SetNull)
+  reactivatedBy User?    @relation("ReactivationActor", fields: [reactivatedById], references: [id], onDelete: SetNull)
+
+  @@index([dataScope, category, year, month])
+  @@index([leadId])
+  @@index([customerId])
+  @@index([archivedById])
+  @@index([reactivatedById])
+  @@map("archives")
+}
+
+model ImportBatch {
+  id            String            @id @default(cuid())
+  dataScope     DataScope         @default(DEVELOPMENT) @map("data_scope")
+  uploadedById  String?           @map("uploaded_by_id")
+  fileName      String?           @map("file_name")
+  status        ImportBatchStatus @default(UPLOADED)
+  totalRows     Int               @default(0) @map("total_rows")
+  validRows     Int               @default(0) @map("valid_rows")
+  duplicateRows Int               @default(0) @map("duplicate_rows")
+  failedRows    Int               @default(0) @map("failed_rows")
+  createdAt     DateTime          @default(now()) @map("created_at")
+
+  uploadedBy User?       @relation("ImportUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+  rows       ImportRow[]
+
+  @@index([dataScope, uploadedById, createdAt])
+  @@index([uploadedById])
+  @@map("import_batches")
+}
+
+model ImportRow {
+  id                   String          @id @default(cuid())
+  dataScope            DataScope       @default(DEVELOPMENT) @map("data_scope")
+  batchId              String          @map("batch_id")
+  rowNumber            Int             @map("row_number")
+  rawCustomerName      String?         @map("raw_customer_name")
+  rawPhone             String?         @map("raw_phone")
+  normalizedPhone      String?         @map("normalized_phone")
+  status               ImportRowStatus
+  leadId               String?         @map("lead_id")
+  duplicateCustomerId  String?         @map("duplicate_customer_id")
+  reason               String?
+  metadata             Json            @default("{}")
+  createdAt            DateTime        @default(now()) @map("created_at")
+
+  batch ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  lead  Lead?       @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@unique([batchId, rowNumber])
+  @@index([dataScope, normalizedPhone])
+  @@index([status])
+  @@index([leadId])
+  @@map("import_rows")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  dataScope  DataScope @default(DEVELOPMENT) @map("data_scope")
+  actorId    String?  @map("actor_id")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  before     Json?
+  after      Json?
+  metadata   Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([dataScope, entityType, entityId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
