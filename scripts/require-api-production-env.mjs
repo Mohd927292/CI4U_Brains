@@ -7,6 +7,7 @@ const requiredRenderEnvKeys = [
   "CI4U_REPOSITORY",
   "CI4U_DATA_SCOPE",
   "CI4U_AUTH_MODE",
+  "CI4U_ALLOW_DEV_AUTH_IN_PRODUCTION",
   "CI4U_WEB_ORIGINS",
   "DATABASE_URL",
 ];
