@@ -3,7 +3,7 @@ services:
     name: ci4u-brains-api
     runtime: node
     plan: free
-    buildCommand: npm ci && npm run build:api
+    buildCommand: npm ci --include=dev && npm run build:api
     startCommand: node scripts/require-api-production-env.mjs && npm run prisma:migrate:deploy && npm run start:api
     healthCheckPath: /v1/health
     envVars:
