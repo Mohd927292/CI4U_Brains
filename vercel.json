@@ -1,5 +1,9 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
   "installCommand": "npm ci",
-  "buildCommand": "npm run build"
+  "buildCommand": "npm run build",
+  "env": {
+    "NEXT_PUBLIC_CI4U_API_BASE_URL": "https://ci4u-brains-api.onrender.com/v1"
+  }
 }
