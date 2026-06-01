@@ -88,6 +88,7 @@ Read the deployment plan before exposing the app:
 - [Run On Other Devices](C:/Users/Akhtar/Documents/Codex/2026-05-27/files-mentioned-by-the-user-ui/ci4u-brains/docs/run-on-other-devices.md)
 - [Deployment Details Needed](C:/Users/Akhtar/Documents/Codex/2026-05-27/files-mentioned-by-the-user-ui/ci4u-brains/docs/deployment-details-needed.md)
 - [Hosted Demo Env Vars](C:/Users/Akhtar/Documents/Codex/2026-05-27/files-mentioned-by-the-user-ui/ci4u-brains/docs/hosted-demo-env-vars.md)
+- [Render Free Blueprint Setup](C:/Users/Akhtar/Documents/Codex/2026-05-27/files-mentioned-by-the-user-ui/ci4u-brains/docs/render-free-blueprint-setup.md)
 
 The short version:
 
