@@ -40,6 +40,7 @@ import {
 } from "../lib/ci4u-api";
 
 const sessionStorageKey = "ci4u.devSession.v1";
+const pendingLeadSavesStorageKey = "ci4u.pendingLeadSaves.v1";
 
 const devUsers: Array<{ name: string; role: DevRole; label: string }> = [
   { name: "Rahul Verma", role: "FOUNDER", label: "Founder / full dev access" },
@@ -67,6 +68,41 @@ type FailedBackgroundSave = {
   queue: LeadQueue;
   message: string;
 };
+
+function readPendingBackgroundSaves(): FailedBackgroundSave[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const saved = window.localStorage.getItem(pendingLeadSavesStorageKey);
+    return saved ? (JSON.parse(saved) as FailedBackgroundSave[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePendingBackgroundSaves(saves: FailedBackgroundSave[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  if (!saves.length) {
+    window.localStorage.removeItem(pendingLeadSavesStorageKey);
+    return;
+  }
+
+  window.localStorage.setItem(pendingLeadSavesStorageKey, JSON.stringify(saves));
+}
+
+function rememberBackgroundSave(save: FailedBackgroundSave) {
+  const existing = readPendingBackgroundSaves().filter((item) => item.lead.id !== save.lead.id);
+  writePendingBackgroundSaves([...existing, save]);
+}
+
+function forgetBackgroundSave(leadId: string) {
+  writePendingBackgroundSaves(readPendingBackgroundSaves().filter((item) => item.lead.id !== leadId));
+}
 
 export function Ci4uBrainsApp() {
   const [session, setSession] = useState<DevSession | null>(null);
@@ -142,11 +178,25 @@ export function Ci4uBrainsApp() {
       return;
     }
 
+    const pending = readPendingBackgroundSaves();
+    const pendingTimer = pending.length
+      ? window.setTimeout(() => {
+          setFailedSave(pending[0] ?? null);
+          setWorkMessage(`${pending.length} background save${pending.length === 1 ? "" : "s"} need confirmation. Retry them before closing the CRM.`);
+        }, 0)
+      : null;
+
     const timer = window.setTimeout(() => {
       void loadQueue(activeQueue, session);
     }, 0);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      if (pendingTimer) {
+        window.clearTimeout(pendingTimer);
+      }
+
+      window.clearTimeout(timer);
+    };
   }, [activeQueue, loadQueue, session]);
 
   function prefetchAdjacentLeads(currentLeadId: string, queueSnapshot = rawLeads, activeSession = session) {
@@ -239,6 +289,12 @@ export function Ci4uBrainsApp() {
     setError(null);
     setFailedSave(null);
     setWorkMessage(`Saving ${lead.customerName} in the background. You can continue with the next lead.`);
+    rememberBackgroundSave({
+      lead,
+      payload,
+      queue: queueBeforeSave,
+      message: "This save is queued locally and waiting for server confirmation.",
+    });
     setRawLeads((current) => current.filter((leadItem) => leadItem.id !== lead.id));
     setQueueCounts((current) => ({
       ...current,
@@ -285,12 +341,17 @@ export function Ci4uBrainsApp() {
     try {
       const updated = await apiPost<LeadDetail>(`/leads/${lead.id}/call-outcome`, session, payload);
       leadDetailCache.current.set(updated.id, updated);
+      forgetBackgroundSave(lead.id);
+      const nextPending = readPendingBackgroundSaves()[0] ?? null;
+      setFailedSave(nextPending);
       setWorkMessage(`${lead.customerName} saved as ${formatEnum(updated.currentStage)}.`);
       await loadCounts(session);
       window.setTimeout(() => setWorkMessage(null), 2500);
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : "Background save failed.";
-      setFailedSave({ lead, payload, queue, message });
+      const failed = { lead, payload, queue, message };
+      rememberBackgroundSave(failed);
+      setFailedSave(failed);
       setError(`Background save failed for ${lead.customerName}: ${message}`);
       setRawLeads((current) => (current.some((leadItem) => leadItem.id === lead.id) ? current : [leadDetailToListItem(lead), ...current]));
       await loadCounts(session);

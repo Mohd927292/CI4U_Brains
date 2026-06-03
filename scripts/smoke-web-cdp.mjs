@@ -94,7 +94,7 @@ try {
   await waitForTextareaValue(page, "Next step: nurture", 15000);
   const saveStartedAt = Date.now();
   await clickButtonContaining(page, "Save Lead Update");
-  await waitForText(page, `${nextCustomerName} - +91${nextPhone}`, 15000);
+  await waitForLeadHandoff(page, `${customerName} - +91${phone}`, 15000);
   const handoffMs = Date.now() - saveStartedAt;
   await waitForText(page, "Workflow progress", 15000);
 
@@ -304,6 +304,28 @@ async function waitForTextareaValue(page, text, timeoutMs) {
   }
 
   throw new Error(`Timed out waiting for textarea value "${text}".`);
+}
+
+async function waitForLeadHandoff(page, previousHeading, timeoutMs) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const moved = await evaluate(
+      page,
+      `(() => {
+        const text = document.body.innerText;
+        return !text.includes(${JSON.stringify(previousHeading)}) && (text.includes("Raw Lead First Call") || text.includes("No raw leads yet"));
+      })()`,
+    );
+
+    if (moved) {
+      return;
+    }
+
+    await sleep(100);
+  }
+
+  throw new Error(`Timed out waiting for lead handoff away from "${previousHeading}".`);
 }
 
 async function setRawLeadForm(page, name, phone) {
