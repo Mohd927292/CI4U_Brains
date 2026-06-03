@@ -44,7 +44,7 @@ export type LeadQueue =
   | "LOST"
   | "ARCHIVE";
 
-export type CallOutcome = "SPOKE" | "NOT_INTERESTED" | "WRONG_NUMBER" | "NOT_RECEIVING";
+export type CallOutcome = "SPOKE" | "WARM" | "NOT_INTERESTED" | "WRONG_NUMBER" | "NOT_RECEIVING";
 
 export type FollowUpReason = "NURTURE" | "SITE_VISIT" | "QUOTATION" | "WON";
 

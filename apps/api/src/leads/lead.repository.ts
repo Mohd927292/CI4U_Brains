@@ -169,8 +169,11 @@ export class InMemoryLeadRepository implements LeadRepository {
         summary: activity.summary,
         createdAt: activity.createdAt,
       })),
-      firstCallOutcomeOptions: ["SPOKE", "NOT_INTERESTED", "WRONG_NUMBER", "NOT_RECEIVING"],
-      followUpOutcomeOptions: lead.spokenCount === 0 || lead.currentStage === "WARM" ? ["SPOKE", "NOT_INTERESTED", "WRONG_NUMBER", "NOT_RECEIVING"] : ["SPOKE", "NOT_INTERESTED", "NOT_RECEIVING"],
+      firstCallOutcomeOptions: ["SPOKE", "WARM", "NOT_INTERESTED", "WRONG_NUMBER", "NOT_RECEIVING"],
+      followUpOutcomeOptions:
+        lead.spokenCount === 0 || lead.currentStage === "WARM"
+          ? ["SPOKE", "WARM", "NOT_INTERESTED", "WRONG_NUMBER", "NOT_RECEIVING"]
+          : ["SPOKE", "WARM", "NOT_INTERESTED", "NOT_RECEIVING"],
     };
   }
 

@@ -74,7 +74,7 @@ const siteVisitOutcomeSchema = z.object({
 });
 
 const callOutcomeSchema = z.object({
-  callOutcome: z.enum(["SPOKE", "NOT_INTERESTED", "WRONG_NUMBER", "NOT_RECEIVING"]),
+  callOutcome: z.enum(["SPOKE", "WARM", "NOT_INTERESTED", "WRONG_NUMBER", "NOT_RECEIVING"]),
   conversationSummary: z.string().trim().optional(),
   leadIntent: z.enum(["WARM", "INSTALLATION", "REPAIR_SERVICE", "LOST"]).optional(),
   followUpReason: z.enum(["NURTURE", "SITE_VISIT", "QUOTATION", "WON"]).optional(),
@@ -227,6 +227,10 @@ export class LeadIntakeService {
 
     if (parsed.callOutcome === "NOT_RECEIVING") {
       return this.saveNotReceivingOutcome(dataScope, lead, parsed, now);
+    }
+
+    if (parsed.callOutcome === "WARM") {
+      return this.saveWarmOutcome(lead, parsed, now);
     }
 
     return this.saveSpokenOutcome(lead, parsed, now);
@@ -444,6 +448,47 @@ export class LeadIntakeService {
       wonDetails,
       activityType: followUpReason === "WON" ? "WON_MARKED" : "CALL_OUTCOME",
       activitySummary: `Spoke. Intent: ${leadIntent}. Reason: ${followUpReason}. Summary: ${conversationSummary}.${siteVisitOutcomeText}${oldStageText}${oldIntentText}${quotationText}${wonText}${whatsappText}${uploadText}`,
+      now,
+    });
+  }
+
+  private async saveWarmOutcome(
+    lead: LeadDetail,
+    parsed: z.infer<typeof callOutcomeSchema>,
+    now: Date,
+  ): Promise<LeadDetail> {
+    const nextFollowUpAt = parsed.followUpAt
+      ? parseRequiredDate(parsed.followUpAt, "Warm nurture follow-up date/time is invalid.")
+      : new Date(now.getTime() + oneMonthInMilliseconds);
+    const summary = parsed.conversationSummary?.trim();
+    const oldStageText = lead.currentStage !== "WARM" ? ` Stage changed from ${lead.currentStage} to WARM.` : "";
+    const oldIntentText =
+      lead.currentIntent !== "UNKNOWN" && lead.currentIntent !== "WARM"
+        ? ` Intent changed from ${lead.currentIntent} to WARM.${parsed.intentChangeSummary?.trim() ? ` Reason: ${parsed.intentChangeSummary.trim()}.` : ""}`
+        : "";
+    const summaryText = summary ? ` Summary: ${summary}.` : " Summary not provided by staff.";
+    const whatsappText = parsed.whatsappMessageBody?.trim() ? " WhatsApp draft saved." : "";
+    const uploadText = parsed.uploadedFileName?.trim() ? ` Upload noted: ${parsed.uploadedFileName.trim()}.` : "";
+
+    return this.leadRepository.updateLeadOutcome({
+      dataScope: lead.dataScope,
+      leadId: lead.id,
+      currentStage: "WARM",
+      currentIntent: "WARM",
+      priority: "MEDIUM",
+      nextFollowUpAt,
+      followUpReason: "NURTURE",
+      siteVisitStatus: null,
+      siteVisitScheduledAt: null,
+      notReceivingCount: 0,
+      spokenCount: lead.spokenCount + 1,
+      isArchived: false,
+      archiveCategory: null,
+      whatsappMessageBody: parsed.whatsappMessageBody?.trim() || null,
+      quotation: null,
+      wonDetails: null,
+      activityType: "CALL_OUTCOME",
+      activitySummary: `Warm lead marked. Reason: NURTURE.${summaryText}${oldStageText}${oldIntentText} Next nurture follow-up at ${nextFollowUpAt.toISOString()}.${whatsappText}${uploadText}`,
       now,
     });
   }

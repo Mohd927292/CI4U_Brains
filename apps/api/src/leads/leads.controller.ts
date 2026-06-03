@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Post, Req } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Inject, NotFoundException, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { ZodError } from "zod";
 import { LeadIntakeService, LeadValidationError, type CreateLeadInput, type SaveCallOutcomeInput } from "./lead-intake.service";
@@ -6,7 +6,7 @@ import { type ImportPreviewRowInput, type LeadQueue } from "./lead.types";
 
 @Controller("leads")
 export class LeadsController {
-  constructor(private readonly leadIntakeService: LeadIntakeService) {}
+  constructor(@Inject(LeadIntakeService) private readonly leadIntakeService: LeadIntakeService) {}
 
   @Get("raw")
   listRawLeads(@Req() req: Request) {

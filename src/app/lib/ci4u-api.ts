@@ -103,7 +103,7 @@ export type WonDetailsSnapshot = {
 };
 
 export type SaveCallOutcomeInput = {
-  callOutcome: "SPOKE" | "NOT_INTERESTED" | "WRONG_NUMBER" | "NOT_RECEIVING";
+  callOutcome: "SPOKE" | "WARM" | "NOT_INTERESTED" | "WRONG_NUMBER" | "NOT_RECEIVING";
   conversationSummary?: string;
   leadIntent?: "WARM" | "INSTALLATION" | "REPAIR_SERVICE" | "LOST";
   followUpReason?: "NURTURE" | "SITE_VISIT" | "QUOTATION" | "WON";
@@ -199,6 +199,14 @@ export type ImportPreviewResult = {
     duplicateInFileRows: number;
   };
   rows: ImportPreviewRow[];
+};
+
+export type ImportCommitResult = {
+  summary: {
+    requestedRows: number;
+    createdRows: number;
+    skippedRows: number;
+  };
 };
 
 const apiBaseUrl = (process.env.NEXT_PUBLIC_CI4U_API_BASE_URL ?? "http://127.0.0.1:4000/v1").replace(/\/$/, "");

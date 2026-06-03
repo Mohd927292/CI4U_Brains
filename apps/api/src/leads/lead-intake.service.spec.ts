@@ -190,8 +190,9 @@ describe("LeadIntakeService", () => {
         currentStage: "RAW_UNTOUCHED",
       });
       expect(detail?.firstCallOutcomeOptions).toContain("SPOKE");
+      expect(detail?.firstCallOutcomeOptions).toContain("WARM");
       expect(detail?.firstCallOutcomeOptions).toContain("WRONG_NUMBER");
-      expect(detail?.firstCallOutcomeOptions).toHaveLength(4);
+      expect(detail?.firstCallOutcomeOptions).toHaveLength(5);
       expect(detail?.followUpOutcomeOptions).toContain("WRONG_NUMBER");
     }
   });
@@ -227,7 +228,7 @@ describe("LeadIntakeService", () => {
     }
   });
 
-  it("moves a spoken warm lead to Warm with Nurture follow-up", async () => {
+  it("moves a direct warm outcome to Warm with optional summary and Nurture follow-up", async () => {
     const repository = new InMemoryLeadRepository();
     const service = new LeadIntakeService(repository);
 
@@ -241,9 +242,7 @@ describe("LeadIntakeService", () => {
 
     if (created.outcome === "created") {
       const updated = await service.saveCallOutcome(dataScope, created.lead.id, {
-        callOutcome: "SPOKE",
-        leadIntent: "WARM",
-        conversationSummary: "Customer may need CCTV after budget approval.",
+        callOutcome: "WARM",
         followUpAt: "2026-06-01T05:30:00.000Z",
       });
 
@@ -251,6 +250,7 @@ describe("LeadIntakeService", () => {
       expect(updated.currentIntent).toBe("WARM");
       expect(updated.followUpReason).toBe("NURTURE");
       expect(updated.priority).toBe("MEDIUM");
+      expect(updated.timeline.at(-1)?.summary).toContain("Summary not provided");
       expect(await service.listLeadsByQueue(dataScope, "WARM")).toHaveLength(1);
     }
   });
@@ -435,9 +435,7 @@ describe("LeadIntakeService", () => {
 
       if (created.outcome === "created") {
         const updated = await service.saveCallOutcome(dataScope, created.lead.id, {
-          callOutcome: "SPOKE",
-          leadIntent: "WARM",
-          conversationSummary: "Customer is interested after budget approval.",
+          callOutcome: "WARM",
         });
 
         expect(updated.currentStage).toBe("WARM");

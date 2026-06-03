@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ChevronRight,
   FileSpreadsheet,
+  Info as InfoIcon,
   LayoutDashboard,
   Loader2,
   LockKeyhole,
@@ -18,6 +19,7 @@ import {
   Upload,
   UserRound,
   UsersRound,
+  X,
 } from "lucide-react";
 import { readSheet } from "read-excel-file/browser";
 import { useCallback, useEffect, useState } from "react";
@@ -27,6 +29,7 @@ import {
   type CreateLeadResponse,
   type DevRole,
   type DevSession,
+  type ImportCommitResult,
   type ImportPreviewResult,
   type ImportRowInput,
   type LeadDetail,
@@ -69,6 +72,7 @@ export function Ci4uBrainsApp() {
   const [selectedLead, setSelectedLead] = useState<LeadDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [workMessage, setWorkMessage] = useState<string | null>(null);
 
   const loadCounts = useCallback(async (activeSession = session) => {
     if (!activeSession) {
@@ -169,9 +173,42 @@ export function Ci4uBrainsApp() {
   }
 
   async function handleLeadSaved(updatedLead: LeadDetail) {
-    setSelectedLead(updatedLead);
-    await loadCounts();
-    await loadQueue(activeQueue);
+    if (!session) {
+      setSelectedLead(updatedLead);
+      return;
+    }
+
+    const queueBeforeSave = activeQueue;
+    const savedLeadId = selectedLead?.id ?? updatedLead.id;
+    setLoading(true);
+    setError(null);
+    setWorkMessage("Lead saved. Opening the next record from this working queue...");
+
+    try {
+      const nextQueue = await apiGet<RawLeadListItem[]>(`/leads/queue/${queueBeforeSave}`, session);
+      setRawLeads(nextQueue);
+      setActiveQueue(queueBeforeSave);
+      await loadCounts(session);
+
+      const nextLead = nextQueue.find((leadItem) => leadItem.id !== savedLeadId);
+
+      if (nextLead) {
+        setSelectedLead(await apiGet<LeadDetail>(`/leads/${nextLead.id}`, session));
+        setActiveView("lead-detail");
+        setWorkMessage(`Saved. Next ${queueTitle(queueBeforeSave).toLowerCase()} opened: ${nextLead.customerName}.`);
+      } else {
+        setSelectedLead(null);
+        setActiveView("raw-leads");
+        setWorkMessage(`Saved. No more records are pending in ${queueTitle(queueBeforeSave)}.`);
+      }
+
+      window.setTimeout(() => setWorkMessage(null), 3500);
+    } catch (saveError) {
+      setSelectedLead(updatedLead);
+      setError(saveError instanceof Error ? saveError.message : "Lead was saved, but the next record could not be opened.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   if (!sessionReady) {
@@ -205,6 +242,7 @@ export function Ci4uBrainsApp() {
           <TopBar session={session} rawCount={queueCounts.RAW} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((value) => !value)} onLogout={logout} />
           <div className="mx-auto flex w-full max-w-[1540px] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
             {error ? <Notice tone="danger" title="Action blocked" message={error} /> : null}
+            {workMessage ? <Notice tone="success" title="Workflow progress" message={workMessage} /> : null}
             {loading ? <LoadingBar /> : null}
             {activeView === "dashboard" ? (
               <DashboardHome counts={queueCounts} onOpenQueue={openQueue} />
@@ -220,7 +258,7 @@ export function Ci4uBrainsApp() {
               />
             ) : null}
             {activeView === "lead-detail" && selectedLead ? (
-              <LeadDetailWorkspaceV2 lead={selectedLead} session={session} onSaved={handleLeadSaved} onBack={() => setActiveView("raw-leads")} />
+              <LeadDetailWorkspaceV2 key={selectedLead.id} lead={selectedLead} session={session} onSaved={handleLeadSaved} onBack={() => setActiveView("raw-leads")} />
             ) : null}
           </div>
         </section>
@@ -451,10 +489,12 @@ function RawLeadsWorkspace({
   const [importRows, setImportRows] = useState<ImportRowInput[]>([]);
   const [importPreview, setImportPreview] = useState<ImportPreviewResult | null>(null);
   const [fileMessage, setFileMessage] = useState<string | null>(null);
+  const [workStatus, setWorkStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function createManualLead() {
     setBusy(true);
+    setWorkStatus("Saving manual raw lead and checking phone duplicates...");
     setManualResult(null);
 
     try {
@@ -490,6 +530,7 @@ function RawLeadsWorkspace({
       });
     } finally {
       setBusy(false);
+      setWorkStatus(null);
     }
   }
 
@@ -501,33 +542,53 @@ function RawLeadsWorkspace({
       return;
     }
 
-    const parsedRows = file.name.toLowerCase().endsWith(".xlsx") ? await parseXlsx(file) : await parseCsv(file);
-    const mapped = mapRowsToLeadInputs(parsedRows);
-    setImportRows(mapped);
-    setFileMessage(`${file.name}: ${mapped.length} rows detected after header and blank-row cleanup.`);
+    setBusy(true);
+    setWorkStatus(`Reading ${file.name}...`);
+    setFileMessage("Reading file. Do not reload this page.");
+
+    try {
+      const parsedRows = file.name.toLowerCase().endsWith(".xlsx") ? await parseXlsx(file) : await parseCsv(file);
+      const mapped = mapRowsToLeadInputs(parsedRows);
+      setImportRows(mapped);
+      setFileMessage(`${file.name}: ${mapped.length} rows detected after header and blank-row cleanup. Next step: Preview Import.`);
+    } catch (error) {
+      setFileMessage(error instanceof Error ? error.message : "Could not read this file.");
+    } finally {
+      setBusy(false);
+      setWorkStatus(null);
+    }
   }
 
   async function previewImport() {
     setBusy(true);
+    setWorkStatus("Checking every phone number against active, won, lost, and archived records...");
 
     try {
       setImportPreview(await apiPost<ImportPreviewResult>("/leads/import/preview", session, { rows: importRows }));
+      setFileMessage("Preview ready. Only New rows can be committed; duplicates stay blocked.");
+    } catch (error) {
+      setFileMessage(error instanceof Error ? error.message : "Import preview failed.");
     } finally {
       setBusy(false);
+      setWorkStatus(null);
     }
   }
 
   async function commitImport() {
     setBusy(true);
+    setWorkStatus("Committing valid rows as Raw Leads. Please do not reload.");
 
     try {
-      await apiPost("/leads/import/commit", session, { rows: importRows, source: "FILE_IMPORT" });
+      const result = await apiPost<ImportCommitResult>("/leads/import/commit", session, { rows: importRows, source: "FILE_IMPORT" });
       setImportPreview(null);
       setImportRows([]);
-      setFileMessage("Import committed. Valid new rows became Raw Leads.");
+      setFileMessage(`Import committed: ${result.summary.createdRows} created, ${result.summary.skippedRows} skipped from ${result.summary.requestedRows} checked rows.`);
       onLeadCreated();
+    } catch (error) {
+      setFileMessage(error instanceof Error ? error.message : "Import commit failed.");
     } finally {
       setBusy(false);
+      setWorkStatus(null);
     }
   }
 
@@ -558,6 +619,7 @@ function RawLeadsWorkspace({
                 <span>Choose CSV or XLSX file</span>
                 <input className="hidden" accept=".csv,.xlsx" type="file" onChange={(event) => void handleFile(event.target.files?.[0] ?? null)} />
               </label>
+              {workStatus ? <InlineProgress message={workStatus} /> : null}
               {fileMessage ? <p className="text-sm text-slate-300">{fileMessage}</p> : null}
               <button className="secondary-button w-full" disabled={!importRows.length || busy} onClick={previewImport}>
                 <FileSpreadsheet className="h-4 w-4" />
@@ -583,7 +645,7 @@ function RawLeadsWorkspace({
             </button>
           }
         >
-          <div className="overflow-hidden rounded-md border border-white/10">
+          <div className="overflow-x-auto rounded-md border border-white/10">
             <table className="w-full min-w-[760px] border-collapse text-left text-sm">
               <thead className="bg-white/[0.04] text-xs uppercase text-slate-400">
                 <tr>
@@ -706,7 +768,7 @@ function LeadDetailWorkspaceV2({
   const warmDefault = defaultLocalDateTime(30);
   const [callOutcome, setCallOutcome] = useState("");
   const [conversationSummary, setConversationSummary] = useState("");
-  const [intent, setIntent] = useState<SaveCallOutcomeInput["leadIntent"] | "">(lead.currentIntent === "UNKNOWN" ? "" : (lead.currentIntent as SaveCallOutcomeInput["leadIntent"]));
+  const [intent, setIntent] = useState<SaveCallOutcomeInput["leadIntent"] | "">(lead.currentIntent === "INSTALLATION" || lead.currentIntent === "REPAIR_SERVICE" ? (lead.currentIntent as SaveCallOutcomeInput["leadIntent"]) : "");
   const [intentChangeSummary, setIntentChangeSummary] = useState("");
   const [lostSummary, setLostSummary] = useState("");
   const [followUpReason, setFollowUpReason] = useState<SaveCallOutcomeInput["followUpReason"] | "">(lead.followUpReason === "SITE_VISIT" || lead.followUpReason === "QUOTATION" || lead.followUpReason === "WON" ? (lead.followUpReason as SaveCallOutcomeInput["followUpReason"]) : "NURTURE");
@@ -733,12 +795,14 @@ function LeadDetailWorkspaceV2({
   const [wonAdvancePayment, setWonAdvancePayment] = useState(lead.wonDetails ? String(paiseToRs(lead.wonDetails.advancePaymentPaise)) : "0");
   const [whatsappMessage, setWhatsappMessage] = useState("");
   const [uploadedFileName, setUploadedFileName] = useState("");
+  const [inspectedEvent, setInspectedEvent] = useState<LeadDetail["timeline"][number] | null>(null);
   const [notice, setNotice] = useState<{ tone: "success" | "warning" | "danger"; title: string; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
   const isFollowUp = lead.currentStage !== "RAW_UNTOUCHED" || lead.spokenCount > 0;
-  const outcomeOptions = isFollowUp ? lead.followUpOutcomeOptions : lead.firstCallOutcomeOptions;
+  const outcomeOptions = normalizeOutcomeOptions(isFollowUp ? lead.followUpOutcomeOptions : lead.firstCallOutcomeOptions, lead);
   const spokeSelected = callOutcome === "SPOKE";
+  const warmSelected = callOutcome === "WARM";
   const notInterestedSelected = callOutcome === "NOT_INTERESTED";
   const notReceivingSelected = callOutcome === "NOT_RECEIVING";
   const hotIntent = intent === "INSTALLATION" || intent === "REPAIR_SERVICE";
@@ -747,18 +811,23 @@ function LeadDetailWorkspaceV2({
   const needsSiteVisitOutcome = spokeSelected && existingScheduledSiteVisit;
   const needsSiteVisitSchedule = spokeSelected && hotIntent && followUpReason === "SITE_VISIT";
   const nextNotReceivingLabel = getNextNotReceivingLabel(lead);
+  const isWonLead = lead.currentStage === "CAPTURED_WON";
 
-  function handleIntentChange(value: string) {
-    const nextIntent = value as SaveCallOutcomeInput["leadIntent"];
-    setIntent(nextIntent);
+  function handleOutcomeChange(value: string) {
+    setCallOutcome(value);
 
-    if (nextIntent === "WARM") {
+    if (value === "WARM") {
+      setIntent("");
       setFollowUpReason("NURTURE");
       const nextMonth = defaultLocalDateTime(30);
       setFollowUpDate(nextMonth.date);
       setFollowUpTime(nextMonth.time);
-      return;
     }
+  }
+
+  function handleIntentChange(value: string) {
+    const nextIntent = value as SaveCallOutcomeInput["leadIntent"];
+    setIntent(nextIntent);
 
     if (nextIntent === "INSTALLATION" || nextIntent === "REPAIR_SERVICE") {
       setFollowUpReason((current) => current || "NURTURE");
@@ -766,7 +835,7 @@ function LeadDetailWorkspaceV2({
   }
 
   function handleGenerateMessage() {
-    setWhatsappMessage(generateWhatsAppDraft({ lead, intent, followUpReason, conversationSummary, siteVisitStatus }));
+    setWhatsappMessage(generateWhatsAppDraft({ lead, intent: warmSelected ? "WARM" : intent, followUpReason: warmSelected ? "NURTURE" : followUpReason, conversationSummary, siteVisitStatus }));
   }
 
   async function saveCallUpdate() {
@@ -778,7 +847,12 @@ function LeadDetailWorkspaceV2({
         callOutcome: callOutcome as SaveCallOutcomeInput["callOutcome"],
         conversationSummary,
         uploadedFileName: uploadedFileName || undefined,
+        whatsappMessageBody: whatsappMessage.trim() || undefined,
       };
+
+      if (warmSelected) {
+        payload.followUpAt = localDateTimeToIso(followUpDate, followUpTime);
+      }
 
       if (spokeSelected) {
         payload.leadIntent = intent || undefined;
@@ -888,13 +962,20 @@ function LeadDetailWorkspaceV2({
         />
       ) : null}
 
+      {inspectedEvent ? (
+        <TimelineDetailTab event={inspectedEvent} onClose={() => setInspectedEvent(null)} />
+      ) : null}
+
       <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
+        {isWonLead ? (
+          <WonLeadOperationsPreview lead={lead} />
+        ) : (
         <Panel title={isFollowUp ? `${formatEnum(lead.currentIntent)} follow-up #${lead.spokenCount + 1}` : "Raw Lead First Call"}>
           {existingScheduledSiteVisit ? <Notice tone="warning" title="Scheduled site visit follow-up" message="When the customer is spoken to, first record whether the site visit was completed." /> : null}
 
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Call Outcome">
-              <select className="field" value={callOutcome} onChange={(event) => setCallOutcome(event.target.value)}>
+              <select className="field" value={callOutcome} onChange={(event) => handleOutcomeChange(event.target.value)}>
                 <option value="">Select outcome</option>
                 {outcomeOptions.map((option) => (
                   <option key={option} value={option}>{formatEnum(option)}</option>
@@ -903,11 +984,25 @@ function LeadDetailWorkspaceV2({
             </Field>
           </div>
 
-          {(spokeSelected || notInterestedSelected) ? (
+          {(spokeSelected || warmSelected || notInterestedSelected) ? (
             <div className="mt-5">
-              <Field label="Conversation Summary">
+              <Field label={warmSelected ? "Conversation Summary (optional)" : "Conversation Summary"}>
                 <textarea className="field min-h-28" value={conversationSummary} onChange={(event) => setConversationSummary(event.target.value)} placeholder="Write customer requirement, discussion, objection, location, and next action." />
               </Field>
+            </div>
+          ) : null}
+
+          {warmSelected ? (
+            <div className="mt-4 space-y-4">
+              <Notice tone="success" title="Warm nurture lead" message="This keeps the lead active, sets reason to Nurture, and defaults the next follow-up to one month later. Summary is optional for this shortcut." />
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field label="Nurture Follow-up Date">
+                  <input className="field" type="date" value={followUpDate} onChange={(event) => setFollowUpDate(event.target.value)} />
+                </Field>
+                <Field label="Follow-up Time">
+                  <input className="field" type="time" value={followUpTime} onChange={(event) => setFollowUpTime(event.target.value)} />
+                </Field>
+              </div>
             </div>
           ) : null}
 
@@ -944,7 +1039,6 @@ function LeadDetailWorkspaceV2({
               <Field label="Lead Intent">
                 <select className="field" value={intent} onChange={(event) => handleIntentChange(event.target.value)}>
                   <option value="">Select intent</option>
-                  <option value="WARM">Warm</option>
                   <option value="INSTALLATION">Installation</option>
                   <option value="REPAIR_SERVICE">Repair / Service</option>
                   {isFollowUp ? <option value="LOST">Lost</option> : null}
@@ -968,12 +1062,6 @@ function LeadDetailWorkspaceV2({
               <Field label="Lost Summary">
                 <textarea className="field min-h-24" value={lostSummary} onChange={(event) => setLostSummary(event.target.value)} />
               </Field>
-            </div>
-          ) : null}
-
-          {spokeSelected && intent === "WARM" ? (
-            <div className="mt-4">
-              <Info label="Follow-up Reason" value="Nurture" />
             </div>
           ) : null}
 
@@ -1030,7 +1118,7 @@ function LeadDetailWorkspaceV2({
 
           {callOutcome === "WRONG_NUMBER" ? <Notice tone="warning" title="Wrong number" message="This moves the record into Wrong Number archive and keeps history searchable." /> : null}
 
-          {spokeSelected ? (
+          {(spokeSelected || warmSelected) ? (
             <div className="mt-5 space-y-4">
               <div className="flex flex-wrap gap-3">
                 <button className="secondary-button" type="button" onClick={handleGenerateMessage}>Generate WhatsApp Draft</button>
@@ -1054,16 +1142,14 @@ function LeadDetailWorkspaceV2({
             Save Lead Update
           </button>
         </Panel>
+        )}
 
         <Panel title="History Timeline">
           <div className="space-y-3">
             {lead.latestQuotation ? <Info label="Latest Quotation" value={`${lead.latestQuotation.title} - Rs ${paiseToRs(lead.latestQuotation.totalPricePaise)}`} /> : null}
             {lead.wonDetails ? <Info label="Won Accepted Price" value={`Rs ${paiseToRs(lead.wonDetails.acceptedPricePaise)}`} /> : null}
             {lead.timeline.map((event) => (
-              <div key={event.id} className="rounded-md border border-white/10 bg-white/[0.03] p-3">
-                <div className="text-xs uppercase text-cyan-200">{formatEnum(event.type)}</div>
-                <div className="mt-1 text-sm text-slate-200">{event.summary}</div>
-              </div>
+              <TimelineEventCard key={event.id} event={event} onInspect={() => setInspectedEvent(event)} />
             ))}
           </div>
         </Panel>
@@ -1225,10 +1311,16 @@ function WonDetailsPanel({
   onClose: () => void;
 }) {
   return (
-    <section className="rounded-md border border-emerald-300/30 bg-emerald-400/10 p-5">
+    <section className="sticky top-20 z-20 rounded-md border border-emerald-300/30 bg-[#06271f] p-5 shadow-[0_22px_70px_rgba(0,0,0,0.35)]">
       <div className="mb-4 flex items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold">Upload Won Customer Details</h2>
-        <button className="secondary-button" type="button" onClick={onClose}>Done</button>
+        <div>
+          <h2 className="text-xl font-semibold">Upload Won Customer Details</h2>
+          <p className="mt-1 text-sm text-emerald-100/80">This top panel is mandatory before the lead can move to Won Leads. Vendor/job workflow starts in the next backend phase.</p>
+        </div>
+        <button className="secondary-button" type="button" onClick={onClose}>
+          <X className="h-4 w-4" />
+          Done
+        </button>
       </div>
       <div className="grid gap-4 md:grid-cols-3">
         <label className="flex items-center gap-3 rounded-md border border-white/10 bg-white/[0.03] px-3 py-3 text-sm font-semibold">
@@ -1274,6 +1366,201 @@ function WonDetailsPanel({
       </div>
     </section>
   );
+}
+
+function WonLeadOperationsPreview({ lead }: { lead: LeadDetail }) {
+  const details = lead.wonDetails;
+
+  return (
+    <Panel title="Won Lead Operations">
+      <Notice
+        tone="warning"
+        title="Operations backend is the next controlled phase"
+        message="This won lead will not show the normal call-outcome dialog. Vendor assignment, work start/pause/end, photos, and PDF certificates must be backed by job, vendor, file-storage, and audit tables before they become active."
+      />
+
+      {details ? (
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <Info label="Site Contact" value={details.siteContactNumber} />
+          <Info label="Schedule" value={details.scheduledAt ? formatDateTime(details.scheduledAt) : formatEnum(details.scheduleStatus)} />
+          <Info label="Quoted Price" value={`Rs ${paiseToRs(details.quotedPricePaise)}`} />
+          <Info label="Accepted Price" value={`Rs ${paiseToRs(details.acceptedPricePaise)}`} />
+          <Info label="Advance Payment" value={`Rs ${paiseToRs(details.advancePaymentPaise)}`} />
+          <Info label="Scope" value={details.scopeOfWork} />
+          <div className="md:col-span-2">
+            <Info label="Location / Written Address" value={details.address} />
+          </div>
+        </div>
+      ) : (
+        <Notice tone="danger" title="Won details missing" message="This record is marked won but does not have won customer details. Fix this before operations starts." />
+      )}
+
+      <div className="mt-5 grid gap-3 md:grid-cols-4">
+        <OperationStep title="Assign Work" text="Needs vendor database, offer price, and vendor WhatsApp message generation." />
+        <OperationStep title="Work Started" text="Needs job status, timestamps, overdue notifications, and audit log." />
+        <OperationStep title="Photos / Checklist" text="Needs protected storage and upload progress before mobile field usage." />
+        <OperationStep title="Completion PDF" text="Needs certificate templates saved to customer and vendor history." />
+      </div>
+    </Panel>
+  );
+}
+
+function OperationStep({ title, text }: { title: string; text: string }) {
+  return (
+    <div className="rounded-md border border-white/10 bg-white/[0.03] p-4">
+      <div className="font-semibold text-cyan-100">{title}</div>
+      <p className="mt-2 text-sm leading-6 text-slate-300">{text}</p>
+      <button className="secondary-button mt-4 w-full opacity-60" type="button" disabled>
+        Backend phase required
+      </button>
+    </div>
+  );
+}
+
+function TimelineEventCard({ event, onInspect }: { event: LeadDetail["timeline"][number]; onInspect: () => void }) {
+  const sections = timelineSections(event);
+
+  return (
+    <div className="rounded-md border border-white/10 bg-white/[0.03] p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs uppercase text-cyan-200">{formatEnum(event.type)}</div>
+          <div className="mt-1 text-xs text-slate-400">{formatDateTime(event.createdAt)}</div>
+        </div>
+        <button
+          className="grid h-8 w-8 place-items-center rounded-md border border-cyan-300/20 bg-cyan-300/10 text-cyan-100"
+          type="button"
+          onClick={onInspect}
+          title="View follow-up details"
+        >
+          <InfoIcon className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="mt-3 space-y-2">
+        {sections.slice(0, 4).map((section) => (
+          <div key={`${event.id}-${section.label}`} className="rounded-md border border-white/10 bg-black/15 px-3 py-2">
+            <div className="text-[11px] uppercase text-slate-500">{section.label}</div>
+            <div className="mt-1 text-sm text-slate-100">{section.value}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TimelineDetailTab({ event, onClose }: { event: LeadDetail["timeline"][number]; onClose: () => void }) {
+  const sections = timelineSections(event);
+
+  return (
+    <section className="sticky top-20 z-20 rounded-md border border-cyan-300/30 bg-[#071a33] p-5 shadow-[0_22px_70px_rgba(0,0,0,0.35)]">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="text-xs uppercase text-cyan-200">{formatEnum(event.type)}</div>
+          <h2 className="mt-1 text-xl font-semibold">Follow-up Details</h2>
+          <p className="mt-1 text-sm text-slate-300">{formatDateTime(event.createdAt)}</p>
+        </div>
+        <button className="secondary-button" type="button" onClick={onClose}>
+          <X className="h-4 w-4" />
+          Close
+        </button>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        {sections.map((section) => (
+          <Info key={section.label} label={section.label} value={section.value} />
+        ))}
+      </div>
+      <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-4 text-sm leading-6 text-slate-300">
+        {event.summary || "No extra detail was saved for this event."}
+      </div>
+    </section>
+  );
+}
+
+function timelineSections(event: LeadDetail["timeline"][number]): Array<{ label: string; value: string }> {
+  const summary = event.summary || "";
+  const sections: Array<{ label: string; value: string }> = [];
+
+  if (summary.startsWith("Spoke.")) {
+    sections.push({ label: "Call Outcome", value: "Spoke" });
+  } else if (summary.startsWith("Warm lead marked.")) {
+    sections.push({ label: "Call Outcome", value: "Warm / nurture" });
+  } else if (summary.startsWith("Not interested.")) {
+    sections.push({ label: "Call Outcome", value: "Not Interested" });
+  } else if (summary.startsWith("Wrong number.")) {
+    sections.push({ label: "Call Outcome", value: "Wrong Number" });
+  } else if (summary.startsWith("Not receiving")) {
+    sections.push({ label: "Call Outcome", value: "Not Receiving" });
+  }
+
+  const intent = summary.match(/Intent: ([A-Z_]+)/);
+  if (intent) {
+    sections.push({ label: "Lead Intent", value: formatEnum(intent[1]) });
+  }
+
+  const reason = summary.match(/Reason: ([A-Z_]+)/);
+  if (reason) {
+    sections.push({ label: "Follow-up Reason", value: formatEnum(reason[1]) });
+  }
+
+  const conversation = summary.match(/Summary: ([\s\S]*?)(?=\. (?:Site visit|Stage changed|Intent changed|Quotation saved|Won details|WhatsApp draft|Upload noted|Lost reason|Next nurture)|$)/);
+  if (conversation?.[1]) {
+    sections.push({ label: "Call Summary", value: conversation[1].trim() });
+  }
+
+  const stageChange = summary.match(/Stage changed from ([A-Z_]+) to ([A-Z_]+)/);
+  if (stageChange) {
+    sections.push({ label: "Stage Change", value: `${formatEnum(stageChange[1])} -> ${formatEnum(stageChange[2])}` });
+  }
+
+  const intentChange = summary.match(/Intent changed from ([A-Z_]+) to ([A-Z_]+)/);
+  if (intentChange) {
+    sections.push({ label: "Intent Change", value: `${formatEnum(intentChange[1])} -> ${formatEnum(intentChange[2])}` });
+  }
+
+  const siteVisitCompleted = summary.match(/Site visit completed\. Outcome: ([\s\S]*?)(?=\. (?:Stage changed|Intent changed|Quotation saved|Won details|WhatsApp draft|Upload noted)|$)/);
+  if (siteVisitCompleted?.[1]) {
+    sections.push({ label: "Site Visit Outcome", value: siteVisitCompleted[1].trim() });
+  }
+
+  const siteVisitMissed = summary.match(/Site visit not completed\. Reason: ([\s\S]*?)(?=\. (?:Stage changed|Intent changed|Quotation saved|Won details|WhatsApp draft|Upload noted)|$)/);
+  if (siteVisitMissed?.[1]) {
+    sections.push({ label: "Visit Not Completed", value: siteVisitMissed[1].trim() });
+  }
+
+  const lostReason = summary.match(/Lost reason: ([\s\S]*?)(?=\. Site visit|$)/);
+  if (lostReason?.[1]) {
+    sections.push({ label: "Lost Reason", value: lostReason[1].trim() });
+  }
+
+  const quotation = summary.match(/Quotation saved with total Rs ([0-9]+)/);
+  if (quotation) {
+    sections.push({ label: "Quotation Total", value: `Rs ${quotation[1]}` });
+  }
+
+  const won = summary.match(/Won details saved with accepted price Rs ([0-9]+)/);
+  if (won) {
+    sections.push({ label: "Won Accepted Price", value: `Rs ${won[1]}` });
+  }
+
+  const nurture = summary.match(/Next nurture follow-up at ([^.]+)/);
+  if (nurture) {
+    sections.push({ label: "Next Nurture Follow-up", value: formatDateTime(nurture[1]) });
+  }
+
+  if (summary.includes("WhatsApp draft saved")) {
+    sections.push({ label: "WhatsApp", value: "Draft saved for manual sending" });
+  }
+
+  const upload = summary.match(/Upload noted: ([^.]+)/);
+  if (upload) {
+    sections.push({ label: "Upload", value: upload[1] });
+  }
+
+  if (!sections.length) {
+    sections.push({ label: "History", value: summary || "No details saved." });
+  }
+
+  return sections;
 }
 
 function localDateTimeToIso(date: string, time: string): string | undefined {
@@ -1409,6 +1696,18 @@ function queueTitle(queue: LeadQueue): string {
   return titles[queue];
 }
 
+function normalizeOutcomeOptions(options: string[], lead: LeadDetail): string[] {
+  if (lead.currentStage === "CAPTURED_WON") {
+    return [];
+  }
+
+  const next = options.includes("WARM")
+    ? [...options]
+    : options.flatMap((option) => (option === "SPOKE" ? ["SPOKE", "WARM"] : [option]));
+
+  return Array.from(new Set(next));
+}
+
 function currentQueueForLead(lead: LeadDetail): LeadQueue {
   if (lead.isArchived) {
     return "ARCHIVE";
@@ -1505,6 +1804,20 @@ function LoadingBar() {
     <div className="flex items-center gap-2 rounded-md border border-blue-300/20 bg-blue-400/10 px-4 py-3 text-sm text-blue-100">
       <Loader2 className="h-4 w-4 animate-spin" />
       Working...
+    </div>
+  );
+}
+
+function InlineProgress({ message }: { message: string }) {
+  return (
+    <div className="rounded-md border border-blue-300/20 bg-blue-400/10 p-3 text-sm text-blue-100">
+      <div className="flex items-center gap-2">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        {message}
+      </div>
+      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10">
+        <div className="h-full w-2/3 animate-pulse rounded-full bg-blue-300" />
+      </div>
     </div>
   );
 }

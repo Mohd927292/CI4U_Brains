@@ -82,15 +82,13 @@ try {
   await waitForText(page, "Raw Lead First Call", 15000);
 
   await setLeadCallUpdate(page, {
-    callOutcome: "SPOKE",
+    callOutcome: "WARM",
     conversationSummary: "Customer is interested but wants a later CCTV follow-up.",
-    leadIntent: "WARM",
   });
   await clickButtonContaining(page, "Generate WhatsApp Draft");
   await waitForTextareaValue(page, "Next step: nurture", 15000);
   await clickButtonContaining(page, "Save Lead Update");
-  await waitForText(page, "Lead updated", 15000);
-  await waitForText(page, "moved to Warm", 15000);
+  await waitForText(page, "Workflow progress", 15000);
 
   const screenshot = await page.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
   await fs.writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
@@ -365,7 +363,9 @@ async function setLeadCallUpdate(page, update) {
       };
 
       setTextarea(document.querySelectorAll("textarea.field")[0], ${JSON.stringify(update.conversationSummary)});
-      setSelect(document.querySelectorAll("select.field")[1], ${JSON.stringify(update.leadIntent)});
+      if (${JSON.stringify(Boolean(update.leadIntent))}) {
+        setSelect(document.querySelectorAll("select.field")[1], ${JSON.stringify(update.leadIntent ?? "")});
+      }
       return true;
     })()`,
   );
