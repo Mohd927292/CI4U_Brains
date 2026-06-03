@@ -71,11 +71,16 @@ try {
   const unique = String(Date.now()).slice(-9);
   const customerName = `UI Smoke ${unique}`;
   const phone = `9${unique}`;
+  const nextCustomerName = `UI Smoke Next ${unique}`;
+  const nextPhone = `8${unique}`;
 
   await setRawLeadForm(page, customerName, phone);
   await clickButtonContaining(page, "Create Raw Lead");
   await waitForText(page, "Raw lead created", 15000);
   await waitForText(page, customerName, 15000);
+  await setRawLeadForm(page, nextCustomerName, nextPhone);
+  await clickButtonContaining(page, "Create Raw Lead");
+  await waitForText(page, nextCustomerName, 15000);
 
   await clickOpenForCustomer(page, customerName);
   await waitForText(page, `${customerName} - +91${phone}`, 15000);
@@ -87,7 +92,10 @@ try {
   });
   await clickButtonContaining(page, "Generate WhatsApp Draft");
   await waitForTextareaValue(page, "Next step: nurture", 15000);
+  const saveStartedAt = Date.now();
   await clickButtonContaining(page, "Save Lead Update");
+  await waitForText(page, `${nextCustomerName} - +91${nextPhone}`, 15000);
+  const handoffMs = Date.now() - saveStartedAt;
   await waitForText(page, "Workflow progress", 15000);
 
   const screenshot = await page.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
@@ -102,7 +110,8 @@ try {
       {
         status: "ok",
         webUrl,
-        checked: ["dev login", "dashboard", "sidebar toggle-ready layout", "manual raw lead", "lead detail", "warm spoken update", "whatsapp draft"],
+        handoffMs,
+        checked: ["dev login", "dashboard", "sidebar toggle-ready layout", "manual raw leads", "lead detail", "warm background save", "instant next-lead handoff", "whatsapp draft"],
         screenshotPath,
       },
       null,

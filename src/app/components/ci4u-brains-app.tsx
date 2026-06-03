@@ -22,7 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { readSheet } from "read-excel-file/browser";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   apiGet,
   apiPost,
@@ -61,6 +61,13 @@ const emptyQueueCounts: QueueCounts = {
   ARCHIVE: 0,
 };
 
+type FailedBackgroundSave = {
+  lead: LeadDetail;
+  payload: SaveCallOutcomeInput;
+  queue: LeadQueue;
+  message: string;
+};
+
 export function Ci4uBrainsApp() {
   const [session, setSession] = useState<DevSession | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
@@ -73,6 +80,8 @@ export function Ci4uBrainsApp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [workMessage, setWorkMessage] = useState<string | null>(null);
+  const [failedSave, setFailedSave] = useState<FailedBackgroundSave | null>(null);
+  const leadDetailCache = useRef<Map<string, LeadDetail>>(new Map());
 
   const loadCounts = useCallback(async (activeSession = session) => {
     if (!activeSession) {
@@ -86,6 +95,17 @@ export function Ci4uBrainsApp() {
     }
   }, [session]);
 
+  const prefetchLeadDetails = useCallback(async (leads: RawLeadListItem[], activeSession: DevSession, limit = 4) => {
+    const candidates = leads.filter((leadItem) => !leadDetailCache.current.has(leadItem.id)).slice(0, limit);
+
+    await Promise.allSettled(
+      candidates.map(async (leadItem) => {
+        const detail = await apiGet<LeadDetail>(`/leads/${leadItem.id}`, activeSession);
+        leadDetailCache.current.set(leadItem.id, detail);
+      }),
+    );
+  }, []);
+
   const loadQueue = useCallback(async (queue: LeadQueue = activeQueue, activeSession = session) => {
     if (!activeSession) {
       return;
@@ -95,15 +115,17 @@ export function Ci4uBrainsApp() {
     setError(null);
 
     try {
-      setRawLeads(await apiGet<RawLeadListItem[]>(`/leads/queue/${queue}`, activeSession));
+      const leads = await apiGet<RawLeadListItem[]>(`/leads/queue/${queue}`, activeSession);
+      setRawLeads(leads);
       setActiveQueue(queue);
+      void prefetchLeadDetails(leads, activeSession);
       await loadCounts(activeSession);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load leads.");
     } finally {
       setLoading(false);
     }
-  }, [activeQueue, loadCounts, session]);
+  }, [activeQueue, loadCounts, prefetchLeadDetails, session]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -127,8 +149,37 @@ export function Ci4uBrainsApp() {
     return () => window.clearTimeout(timer);
   }, [activeQueue, loadQueue, session]);
 
+  function prefetchAdjacentLeads(currentLeadId: string, queueSnapshot = rawLeads, activeSession = session) {
+    if (!activeSession) {
+      return;
+    }
+
+    const currentIndex = queueSnapshot.findIndex((leadItem) => leadItem.id === currentLeadId);
+    const nearby = currentIndex >= 0 ? queueSnapshot.slice(currentIndex + 1, currentIndex + 4) : queueSnapshot.slice(0, 3);
+    void prefetchLeadDetails(nearby, activeSession, 3);
+  }
+
+  function getNextLeadItem(queueSnapshot: RawLeadListItem[], currentLeadId: string): RawLeadListItem | null {
+    const currentIndex = queueSnapshot.findIndex((leadItem) => leadItem.id === currentLeadId);
+
+    if (currentIndex >= 0) {
+      return queueSnapshot[currentIndex + 1] ?? queueSnapshot.find((leadItem) => leadItem.id !== currentLeadId) ?? null;
+    }
+
+    return queueSnapshot.find((leadItem) => leadItem.id !== currentLeadId) ?? null;
+  }
+
   async function openLead(leadId: string) {
     if (!session) {
+      return;
+    }
+
+    const cached = leadDetailCache.current.get(leadId);
+
+    if (cached) {
+      setSelectedLead(cached);
+      setActiveView("lead-detail");
+      prefetchAdjacentLeads(leadId);
       return;
     }
 
@@ -136,8 +187,11 @@ export function Ci4uBrainsApp() {
     setError(null);
 
     try {
-      setSelectedLead(await apiGet<LeadDetail>(`/leads/${leadId}`, session));
+      const detail = await apiGet<LeadDetail>(`/leads/${leadId}`, session);
+      leadDetailCache.current.set(leadId, detail);
+      setSelectedLead(detail);
       setActiveView("lead-detail");
+      prefetchAdjacentLeads(leadId);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not open lead.");
     } finally {
@@ -164,6 +218,8 @@ export function Ci4uBrainsApp() {
     setRawLeads([]);
     setQueueCounts(emptyQueueCounts);
     setSelectedLead(null);
+    setFailedSave(null);
+    leadDetailCache.current.clear();
     setActiveView("dashboard");
   }
 
@@ -172,43 +228,95 @@ export function Ci4uBrainsApp() {
     void loadQueue(queue);
   }
 
-  async function handleLeadSaved(updatedLead: LeadDetail) {
+  function handleLeadUpdateRequested(lead: LeadDetail, payload: SaveCallOutcomeInput) {
     if (!session) {
-      setSelectedLead(updatedLead);
       return;
     }
 
     const queueBeforeSave = activeQueue;
-    const savedLeadId = selectedLead?.id ?? updatedLead.id;
-    setLoading(true);
+    const queueSnapshot = [...rawLeads];
+    const nextLead = getNextLeadItem(queueSnapshot, lead.id);
     setError(null);
-    setWorkMessage("Lead saved. Opening the next record from this working queue...");
+    setFailedSave(null);
+    setWorkMessage(`Saving ${lead.customerName} in the background. You can continue with the next lead.`);
+    setRawLeads((current) => current.filter((leadItem) => leadItem.id !== lead.id));
+    setQueueCounts((current) => ({
+      ...current,
+      [queueBeforeSave]: Math.max(0, (current[queueBeforeSave] ?? 0) - 1),
+    }));
+
+    if (nextLead) {
+      const cached = leadDetailCache.current.get(nextLead.id);
+
+      if (cached) {
+        setSelectedLead(cached);
+        setActiveView("lead-detail");
+        prefetchAdjacentLeads(nextLead.id, queueSnapshot, session);
+      } else {
+        setLoading(true);
+        setSelectedLead(null);
+        setActiveView("lead-detail");
+        void apiGet<LeadDetail>(`/leads/${nextLead.id}`, session)
+          .then((detail) => {
+            leadDetailCache.current.set(nextLead.id, detail);
+            setSelectedLead(detail);
+            prefetchAdjacentLeads(nextLead.id, queueSnapshot, session);
+          })
+          .catch((loadError) => {
+            setSelectedLead(null);
+            setActiveView("raw-leads");
+            setError(loadError instanceof Error ? loadError.message : "Could not open the next lead.");
+          })
+          .finally(() => setLoading(false));
+      }
+    } else {
+      setSelectedLead(null);
+      setActiveView("raw-leads");
+    }
+
+    void saveLeadInBackground(lead, payload, queueBeforeSave);
+  }
+
+  async function saveLeadInBackground(lead: LeadDetail, payload: SaveCallOutcomeInput, queue: LeadQueue) {
+    if (!session) {
+      return;
+    }
 
     try {
-      const nextQueue = await apiGet<RawLeadListItem[]>(`/leads/queue/${queueBeforeSave}`, session);
-      setRawLeads(nextQueue);
-      setActiveQueue(queueBeforeSave);
+      const updated = await apiPost<LeadDetail>(`/leads/${lead.id}/call-outcome`, session, payload);
+      leadDetailCache.current.set(updated.id, updated);
+      setWorkMessage(`${lead.customerName} saved as ${formatEnum(updated.currentStage)}.`);
       await loadCounts(session);
-
-      const nextLead = nextQueue.find((leadItem) => leadItem.id !== savedLeadId);
-
-      if (nextLead) {
-        setSelectedLead(await apiGet<LeadDetail>(`/leads/${nextLead.id}`, session));
-        setActiveView("lead-detail");
-        setWorkMessage(`Saved. Next ${queueTitle(queueBeforeSave).toLowerCase()} opened: ${nextLead.customerName}.`);
-      } else {
-        setSelectedLead(null);
-        setActiveView("raw-leads");
-        setWorkMessage(`Saved. No more records are pending in ${queueTitle(queueBeforeSave)}.`);
-      }
-
-      window.setTimeout(() => setWorkMessage(null), 3500);
+      window.setTimeout(() => setWorkMessage(null), 2500);
     } catch (saveError) {
-      setSelectedLead(updatedLead);
-      setError(saveError instanceof Error ? saveError.message : "Lead was saved, but the next record could not be opened.");
-    } finally {
-      setLoading(false);
+      const message = saveError instanceof Error ? saveError.message : "Background save failed.";
+      setFailedSave({ lead, payload, queue, message });
+      setError(`Background save failed for ${lead.customerName}: ${message}`);
+      setRawLeads((current) => (current.some((leadItem) => leadItem.id === lead.id) ? current : [leadDetailToListItem(lead), ...current]));
+      await loadCounts(session);
     }
+  }
+
+  function retryFailedSave() {
+    if (!failedSave) {
+      return;
+    }
+
+    setError(null);
+    setWorkMessage(`Retrying background save for ${failedSave.lead.customerName}...`);
+    const retry = failedSave;
+    setFailedSave(null);
+    void saveLeadInBackground(retry.lead, retry.payload, retry.queue);
+  }
+
+  function reopenFailedSaveLead() {
+    if (!failedSave) {
+      return;
+    }
+
+    setActiveQueue(failedSave.queue);
+    setSelectedLead(failedSave.lead);
+    setActiveView("lead-detail");
   }
 
   if (!sessionReady) {
@@ -242,6 +350,7 @@ export function Ci4uBrainsApp() {
           <TopBar session={session} rawCount={queueCounts.RAW} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((value) => !value)} onLogout={logout} />
           <div className="mx-auto flex w-full max-w-[1540px] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
             {error ? <Notice tone="danger" title="Action blocked" message={error} /> : null}
+            {failedSave ? <SaveFailureBanner failure={failedSave} onRetry={retryFailedSave} onReopen={reopenFailedSaveLead} /> : null}
             {workMessage ? <Notice tone="success" title="Workflow progress" message={workMessage} /> : null}
             {loading ? <LoadingBar /> : null}
             {activeView === "dashboard" ? (
@@ -258,7 +367,7 @@ export function Ci4uBrainsApp() {
               />
             ) : null}
             {activeView === "lead-detail" && selectedLead ? (
-              <LeadDetailWorkspaceV2 key={selectedLead.id} lead={selectedLead} session={session} onSaved={handleLeadSaved} onBack={() => setActiveView("raw-leads")} />
+              <LeadDetailWorkspaceV2 key={selectedLead.id} lead={selectedLead} onSaveRequested={handleLeadUpdateRequested} onBack={() => setActiveView("raw-leads")} />
             ) : null}
           </div>
         </section>
@@ -702,6 +811,32 @@ function ManualResult({ result }: { result: CreateLeadResponse }) {
   );
 }
 
+function SaveFailureBanner({
+  failure,
+  onRetry,
+  onReopen,
+}: {
+  failure: FailedBackgroundSave;
+  onRetry: () => void;
+  onReopen: () => void;
+}) {
+  return (
+    <section className="rounded-md border border-red-300/30 bg-red-500/10 p-4 text-red-50">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div>
+          <div className="font-semibold">Background save failed for {failure.lead.customerName}</div>
+          <p className="mt-1 text-sm opacity-90">{failure.message}</p>
+          <p className="mt-1 text-sm opacity-80">The lead was returned to the working queue. Retry or reopen it before continuing that customer.</p>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <button className="secondary-button" type="button" onClick={onRetry}>Retry Save</button>
+          <button className="secondary-button" type="button" onClick={onReopen}>Reopen Lead</button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ImportPreview({ preview }: { preview: ImportPreviewResult }) {
   return (
     <Panel title="Import Preview">
@@ -756,13 +891,11 @@ type UiQuotationPackage = {
 
 function LeadDetailWorkspaceV2({
   lead,
-  session,
-  onSaved,
+  onSaveRequested,
   onBack,
 }: {
   lead: LeadDetail;
-  session: DevSession;
-  onSaved: (lead: LeadDetail) => void;
+  onSaveRequested: (lead: LeadDetail, payload: SaveCallOutcomeInput) => void;
   onBack: () => void;
 }) {
   const warmDefault = defaultLocalDateTime(30);
@@ -838,11 +971,66 @@ function LeadDetailWorkspaceV2({
     setWhatsappMessage(generateWhatsAppDraft({ lead, intent: warmSelected ? "WARM" : intent, followUpReason: warmSelected ? "NURTURE" : followUpReason, conversationSummary, siteVisitStatus }));
   }
 
-  async function saveCallUpdate() {
+  function validateBeforeBackgroundSave(): string | null {
+    if (notInterestedSelected && !conversationSummary.trim()) {
+      return "Conversation summary is required for Not Interested.";
+    }
+
+    if (spokeSelected && !intent) {
+      return "Lead intent is required when Spoke is selected.";
+    }
+
+    if (spokeSelected && !conversationSummary.trim()) {
+      return "Conversation summary is required when Spoke is selected.";
+    }
+
+    if (spokeSelected && intent === "LOST" && !lostSummary.trim()) {
+      return "Lost summary is required before moving a lead to Lost Leads.";
+    }
+
+    if (needsSiteVisitOutcome && !siteVisitOutcomeStatus) {
+      return "Site visit status is required for a scheduled site visit follow-up.";
+    }
+
+    if (siteVisitOutcomeStatus === "COMPLETED" && !siteVisitOutcomeSummary.trim()) {
+      return "Site visit outcome summary is required.";
+    }
+
+    if (siteVisitOutcomeStatus === "NOT_COMPLETED" && !siteVisitNotCompletedReason.trim()) {
+      return "Reason is required when the site visit was not completed.";
+    }
+
+    if (spokeSelected && hotIntent && !followUpReason) {
+      return "Follow-up reason is required for Installation and Repair/Service.";
+    }
+
+    if (spokeSelected && followUpReason === "SITE_VISIT" && !siteVisitStatus) {
+      return "Site visit scheduled/not scheduled is required.";
+    }
+
+    if (spokeSelected && followUpReason === "WON" && (!wonAddress.trim() || !wonScope.trim() || !wonQuotedPrice || !wonAcceptedPrice)) {
+      return "Won customer details must be uploaded before saving a Won lead.";
+    }
+
+    if (spokeSelected && followUpReason === "WON" && wonScheduleStatus === "SCHEDULED" && (!wonScheduleDate || !wonScheduleTime)) {
+      return "Won schedule date and time are required when work is scheduled.";
+    }
+
+    return null;
+  }
+
+  function saveCallUpdate() {
     setBusy(true);
     setNotice(null);
 
     try {
+      const validationError = validateBeforeBackgroundSave();
+
+      if (validationError) {
+        setNotice({ tone: "danger", title: "Save blocked", message: validationError });
+        return;
+      }
+
       const payload: SaveCallOutcomeInput = {
         callOutcome: callOutcome as SaveCallOutcomeInput["callOutcome"],
         conversationSummary,
@@ -910,9 +1098,7 @@ function LeadDetailWorkspaceV2({
         }
       }
 
-      const updated = await apiPost<LeadDetail>(`/leads/${lead.id}/call-outcome`, session, payload);
-      onSaved(updated);
-      setNotice({ tone: "success", title: "Lead updated", message: `${updated.customerName} moved to ${formatEnum(updated.currentStage)}.` });
+      onSaveRequested(lead, payload);
     } catch (error) {
       setNotice({ tone: "danger", title: "Save blocked", message: error instanceof Error ? error.message : "Could not save this call update." });
     } finally {
@@ -1706,6 +1892,26 @@ function normalizeOutcomeOptions(options: string[], lead: LeadDetail): string[] 
     : options.flatMap((option) => (option === "SPOKE" ? ["SPOKE", "WARM"] : [option]));
 
   return Array.from(new Set(next));
+}
+
+function leadDetailToListItem(lead: LeadDetail): RawLeadListItem {
+  return {
+    id: lead.id,
+    customerId: lead.customerId,
+    customerName: lead.customerName,
+    phoneNormalized: lead.phoneNormalized,
+    source: lead.source,
+    currentStage: lead.currentStage,
+    currentIntent: lead.currentIntent,
+    priority: lead.priority,
+    nextFollowUpAt: lead.nextFollowUpAt,
+    followUpReason: lead.followUpReason,
+    notReceivingCount: lead.notReceivingCount,
+    assignedToName: lead.assignedToName,
+    lastActivitySummary: lead.lastActivitySummary,
+    createdAt: lead.createdAt,
+    updatedAt: lead.updatedAt,
+  };
 }
 
 function currentQueueForLead(lead: LeadDetail): LeadQueue {
