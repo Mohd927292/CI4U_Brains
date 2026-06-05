@@ -255,6 +255,31 @@ describe("LeadIntakeService", () => {
     }
   });
 
+  it("returns a compact server-confirmed ack for fast lead saves", async () => {
+    const repository = new InMemoryLeadRepository();
+    const service = new LeadIntakeService(repository);
+
+    const created = await service.createManualLead(dataScope, {
+      businessName: "Fast Ack Customer",
+      phone: "9123456791",
+      source: "MANUAL",
+    });
+
+    expect(created.outcome).toBe("created");
+
+    if (created.outcome === "created") {
+      const ack = await service.saveCallOutcomeAck(dataScope, created.lead.id, {
+        callOutcome: "WARM",
+      });
+
+      expect(ack.serverConfirmed).toBe(true);
+      expect(ack.currentStage).toBe("WARM");
+      expect(ack.lastActivitySummary).toContain("Warm lead marked");
+      expect("timeline" in ack).toBe(false);
+      expect("quotationSuggestions" in ack).toBe(false);
+    }
+  });
+
   it("moves a hot installation lead with scheduled site visit using visit time as follow-up", async () => {
     const repository = new InMemoryLeadRepository();
     const service = new LeadIntakeService(repository);

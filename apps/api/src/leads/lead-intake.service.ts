@@ -20,12 +20,15 @@ import {
   type LeadDetail,
   type LeadPriority,
   type LeadQueue,
+  type LeadSaveAck,
   type LeadStage,
+  type LeadWorkflowState,
   type PersistedQuotationInput,
   type PersistedWonDetailsInput,
   type QueueCounts,
   type RawLeadListItem,
   type SiteVisitScheduleStatus,
+  type UpdateLeadOutcomeRecordInput,
 } from "./lead.types";
 
 const createLeadInputSchema = z.object({
@@ -91,6 +94,8 @@ const callOutcomeSchema = z.object({
 });
 
 export type SaveCallOutcomeInput = z.input<typeof callOutcomeSchema>;
+type SaveMode = "detail" | "ack";
+type SaveCallOutcomeResult = LeadDetail | LeadSaveAck;
 
 const notReceivingSchedule = [
   { label: "3 hours", milliseconds: 3 * 60 * 60 * 1000 },
@@ -173,14 +178,28 @@ export class LeadIntakeService {
       throw new LeadValidationError("Lead was not found.", "LEAD_NOT_FOUND");
     }
 
+    return this.saveCallOutcomeForLead(lead, input, "detail") as Promise<LeadDetail>;
+  }
+
+  async saveCallOutcomeAck(dataScope: DataScope, leadId: string, input: SaveCallOutcomeInput): Promise<LeadSaveAck> {
+    const lead = await this.leadRepository.getLeadWorkflowState(dataScope, leadId);
+
+    if (!lead) {
+      throw new LeadValidationError("Lead was not found.", "LEAD_NOT_FOUND");
+    }
+
+    return this.saveCallOutcomeForLead(lead, input, "ack") as Promise<LeadSaveAck>;
+  }
+
+  private async saveCallOutcomeForLead(lead: LeadWorkflowState, input: SaveCallOutcomeInput, mode: SaveMode): Promise<SaveCallOutcomeResult> {
     const parsed = callOutcomeSchema.parse(input);
     const now = new Date();
 
     if (parsed.callOutcome === "NOT_INTERESTED") {
       const summary = requireText(parsed.conversationSummary, "Conversation summary is required for Not Interested.");
-      return this.leadRepository.updateLeadOutcome({
-        dataScope,
-        leadId,
+      return this.persistOutcome({
+        dataScope: lead.dataScope,
+        leadId: lead.id,
         currentStage: "NOT_INTERESTED",
         currentIntent: "UNKNOWN",
         priority: "LOW",
@@ -198,13 +217,13 @@ export class LeadIntakeService {
         activityType: "ARCHIVED",
         activitySummary: `Not interested. Summary: ${summary}`,
         now,
-      });
+      }, mode);
     }
 
     if (parsed.callOutcome === "WRONG_NUMBER") {
-      return this.leadRepository.updateLeadOutcome({
-        dataScope,
-        leadId,
+      return this.persistOutcome({
+        dataScope: lead.dataScope,
+        leadId: lead.id,
         currentStage: "WRONG_NUMBER",
         currentIntent: "UNKNOWN",
         priority: "LOW",
@@ -222,18 +241,18 @@ export class LeadIntakeService {
         activityType: "ARCHIVED",
         activitySummary: parsed.conversationSummary?.trim() ? `Wrong number. Note: ${parsed.conversationSummary.trim()}` : "Wrong number. Archived for review.",
         now,
-      });
+      }, mode);
     }
 
     if (parsed.callOutcome === "NOT_RECEIVING") {
-      return this.saveNotReceivingOutcome(dataScope, lead, parsed, now);
+      return this.saveNotReceivingOutcome(lead, parsed, now, mode);
     }
 
     if (parsed.callOutcome === "WARM") {
-      return this.saveWarmOutcome(lead, parsed, now);
+      return this.saveWarmOutcome(lead, parsed, now, mode);
     }
 
-    return this.saveSpokenOutcome(lead, parsed, now);
+    return this.saveSpokenOutcome(lead, parsed, now, mode);
   }
 
   async previewImportRows(dataScope: DataScope, rows: ImportPreviewRowInput[]): Promise<ImportPreviewResult> {
@@ -368,11 +387,16 @@ export class LeadIntakeService {
     };
   }
 
+  private persistOutcome(input: UpdateLeadOutcomeRecordInput, mode: SaveMode): Promise<SaveCallOutcomeResult> {
+    return mode === "ack" ? this.leadRepository.updateLeadOutcomeAck(input) : this.leadRepository.updateLeadOutcome(input);
+  }
+
   private async saveSpokenOutcome(
-    lead: LeadDetail,
+    lead: LeadWorkflowState,
     parsed: z.infer<typeof callOutcomeSchema> & { callOutcome: CallOutcome },
     now: Date,
-  ): Promise<LeadDetail> {
+    mode: SaveMode,
+  ): Promise<SaveCallOutcomeResult> {
     const requestedIntent = requireIntent(parsed.leadIntent);
     const conversationSummary = requireText(parsed.conversationSummary, "Conversation summary is required when Spoke is selected.");
     const siteVisitOutcomeText = this.resolveSiteVisitOutcomeText(lead, parsed);
@@ -384,7 +408,7 @@ export class LeadIntakeService {
         throw new LeadValidationError("Lost can only be used after at least one previous spoken interaction.", "LOST_NOT_ALLOWED_ON_FIRST_CALL");
       }
 
-      return this.leadRepository.updateLeadOutcome({
+      return this.persistOutcome({
         dataScope: lead.dataScope,
         leadId: lead.id,
         currentStage: "LOST",
@@ -404,7 +428,7 @@ export class LeadIntakeService {
         activityType: "CALL_OUTCOME",
         activitySummary: `Lost lead. Summary: ${conversationSummary}. Lost reason: ${lostSummary}.${siteVisitOutcomeText}`,
         now,
-      });
+      }, mode);
     }
 
     const leadIntent = requestedIntent;
@@ -429,7 +453,7 @@ export class LeadIntakeService {
     const whatsappText = parsed.whatsappMessageBody?.trim() ? ` WhatsApp draft saved.` : "";
     const uploadText = parsed.uploadedFileName?.trim() ? ` Upload noted: ${parsed.uploadedFileName.trim()}.` : "";
 
-    return this.leadRepository.updateLeadOutcome({
+    return this.persistOutcome({
       dataScope: lead.dataScope,
       leadId: lead.id,
       currentStage,
@@ -449,14 +473,15 @@ export class LeadIntakeService {
       activityType: followUpReason === "WON" ? "WON_MARKED" : "CALL_OUTCOME",
       activitySummary: `Spoke. Intent: ${leadIntent}. Reason: ${followUpReason}. Summary: ${conversationSummary}.${siteVisitOutcomeText}${oldStageText}${oldIntentText}${quotationText}${wonText}${whatsappText}${uploadText}`,
       now,
-    });
+    }, mode);
   }
 
   private async saveWarmOutcome(
-    lead: LeadDetail,
+    lead: LeadWorkflowState,
     parsed: z.infer<typeof callOutcomeSchema>,
     now: Date,
-  ): Promise<LeadDetail> {
+    mode: SaveMode,
+  ): Promise<SaveCallOutcomeResult> {
     const nextFollowUpAt = parsed.followUpAt
       ? parseRequiredDate(parsed.followUpAt, "Warm nurture follow-up date/time is invalid.")
       : new Date(now.getTime() + oneMonthInMilliseconds);
@@ -470,7 +495,7 @@ export class LeadIntakeService {
     const whatsappText = parsed.whatsappMessageBody?.trim() ? " WhatsApp draft saved." : "";
     const uploadText = parsed.uploadedFileName?.trim() ? ` Upload noted: ${parsed.uploadedFileName.trim()}.` : "";
 
-    return this.leadRepository.updateLeadOutcome({
+    return this.persistOutcome({
       dataScope: lead.dataScope,
       leadId: lead.id,
       currentStage: "WARM",
@@ -490,15 +515,15 @@ export class LeadIntakeService {
       activityType: "CALL_OUTCOME",
       activitySummary: `Warm lead marked. Reason: NURTURE.${summaryText}${oldStageText}${oldIntentText} Next nurture follow-up at ${nextFollowUpAt.toISOString()}.${whatsappText}${uploadText}`,
       now,
-    });
+    }, mode);
   }
 
   private async saveNotReceivingOutcome(
-    dataScope: DataScope,
-    lead: LeadDetail,
+    lead: LeadWorkflowState,
     parsed: z.infer<typeof callOutcomeSchema>,
     now: Date,
-  ): Promise<LeadDetail> {
+    mode: SaveMode,
+  ): Promise<SaveCallOutcomeResult> {
     const nextCount = lead.notReceivingCount + 1;
     const shortSchedule = lead.currentIntent === "INSTALLATION" || lead.currentIntent === "REPAIR_SERVICE" || lead.currentStage === "CAPTURED_WON";
     const schedule = shortSchedule
@@ -506,8 +531,8 @@ export class LeadIntakeService {
       : notReceivingSchedule[nextCount - 1];
 
     if (!schedule) {
-      return this.leadRepository.updateLeadOutcome({
-        dataScope,
+      return this.persistOutcome({
+        dataScope: lead.dataScope,
         leadId: lead.id,
         currentStage: "NOT_RECEIVING_FINAL",
         currentIntent: lead.currentIntent,
@@ -526,14 +551,14 @@ export class LeadIntakeService {
         activityType: "ARCHIVED",
         activitySummary: `Not receiving attempt ${nextCount}. Escalation ladder completed after 3-month stage; moved to Not Receiving Final archive.`,
         now,
-      });
+      }, mode);
     }
 
     const nextFollowUpAt = new Date(now.getTime() + schedule.milliseconds);
     const scheduleText = shortSchedule ? " Hot/won lead uses contextual NR schedule: first 3 hours, then 24 hours repeatedly." : "";
 
-    return this.leadRepository.updateLeadOutcome({
-      dataScope,
+    return this.persistOutcome({
+      dataScope: lead.dataScope,
       leadId: lead.id,
       currentStage: "NOT_RECEIVING",
       currentIntent: lead.currentIntent,
@@ -552,7 +577,7 @@ export class LeadIntakeService {
       activityType: "FOLLOW_UP_SCHEDULED",
       activitySummary: `Not receiving attempt ${nextCount}. Auto-scheduled next unanswered follow-up after ${schedule.label} at ${nextFollowUpAt.toISOString()}.${scheduleText}`,
       now,
-    });
+    }, mode);
   }
 
   private resolveFollowUpReason(leadIntent: "WARM" | "INSTALLATION" | "REPAIR_SERVICE", reason: z.infer<typeof callOutcomeSchema>["followUpReason"]): "NURTURE" | "SITE_VISIT" | "QUOTATION" | "WON" {
@@ -618,7 +643,7 @@ export class LeadIntakeService {
     return leadIntent === "WARM" ? "MEDIUM" : "HIGH";
   }
 
-  private resolveSiteVisitOutcomeText(lead: LeadDetail, parsed: z.infer<typeof callOutcomeSchema>): string {
+  private resolveSiteVisitOutcomeText(lead: LeadWorkflowState, parsed: z.infer<typeof callOutcomeSchema>): string {
     const pendingScheduledVisit = lead.spokenCount > 0 && lead.followUpReason === "SITE_VISIT" && lead.siteVisitStatus === "SCHEDULED";
 
     if (!pendingScheduledVisit) {
@@ -688,7 +713,7 @@ export class LeadIntakeService {
     };
   }
 
-  private normalizeWonDetails(input: z.infer<typeof wonDetailsSchema> | undefined, lead: LeadDetail): PersistedWonDetailsInput {
+  private normalizeWonDetails(input: z.infer<typeof wonDetailsSchema> | undefined, lead: LeadWorkflowState): PersistedWonDetailsInput {
     if (!input) {
       throw new LeadValidationError("Won customer details are required before moving a lead to Won Leads.", "WON_DETAILS_REQUIRED");
     }

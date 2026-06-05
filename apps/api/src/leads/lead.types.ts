@@ -154,6 +154,20 @@ export type RawLeadListItem = {
   updatedAt: Date;
 };
 
+export type LeadWorkflowState = RawLeadListItem & {
+  leadCycleNumber: number;
+  siteVisitStatus: SiteVisitScheduleStatus | null;
+  siteVisitScheduledAt: Date | null;
+  spokenCount: number;
+  isArchived: boolean;
+  archiveCategory: string | null;
+};
+
+export type LeadSaveAck = RawLeadListItem & {
+  savedAt: Date;
+  serverConfirmed: true;
+};
+
 export type QuotationItemInput = {
   itemName: string;
   unitPriceRs: number;
@@ -233,13 +247,7 @@ export type WonDetailsSnapshot = {
   createdAt: Date;
 };
 
-export type LeadDetail = RawLeadListItem & {
-  leadCycleNumber: number;
-  siteVisitStatus: SiteVisitScheduleStatus | null;
-  siteVisitScheduledAt: Date | null;
-  spokenCount: number;
-  isArchived: boolean;
-  archiveCategory: string | null;
+export type LeadDetail = LeadWorkflowState & {
   latestQuotation: QuotationSnapshot | null;
   wonDetails: WonDetailsSnapshot | null;
   quotationSuggestions: QuotationSuggestion;

@@ -32,6 +32,11 @@ export type RawLeadListItem = {
   updatedAt: string;
 };
 
+export type LeadSaveAck = RawLeadListItem & {
+  savedAt: string;
+  serverConfirmed: true;
+};
+
 export type LeadDetail = RawLeadListItem & {
   leadCycleNumber: number;
   siteVisitStatus: string | null;
@@ -52,7 +57,7 @@ export type LeadDetail = RawLeadListItem & {
   followUpOutcomeOptions: string[];
 };
 
-export type LeadQueue = "RAW" | "WARM" | "HOT_INSTALLATION" | "HOT_REPAIR_SERVICE" | "UNANSWERED" | "WON" | "LOST" | "ARCHIVE";
+export type LeadQueue = "RAW" | "WARM" | "HOT_INSTALLATION" | "HOT_REPAIR_SERVICE" | "UNANSWERED" | "GHOSTING" | "WON" | "LOST" | "ARCHIVE";
 
 export type QueueCounts = Record<LeadQueue, number>;
 

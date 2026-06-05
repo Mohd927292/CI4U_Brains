@@ -23,6 +23,8 @@ import {
   type ExistingPhoneRecord,
   type LeadDetail,
   type LeadQueue,
+  type LeadSaveAck,
+  type LeadWorkflowState,
   type QuotationSnapshot,
   type QuotationSuggestion,
   type QueueCounts,
@@ -252,6 +254,19 @@ export class PrismaLeadRepository implements LeadRepository {
     };
   }
 
+  async getLeadWorkflowState(dataScope: DataScope, leadId: string): Promise<LeadWorkflowState | null> {
+    const lead = await this.prisma.lead.findUnique({
+      where: { id: leadId },
+      include: {
+        customer: true,
+        assignedTo: { select: { name: true } },
+        activities: { orderBy: { createdAt: "desc" }, take: 1 },
+      },
+    });
+
+    return lead && lead.dataScope === toDbDataScope(dataScope) ? this.toLeadWorkflowState(lead as LeadWithCustomer) : null;
+  }
+
   async getLeadDetail(dataScope: DataScope, leadId: string): Promise<LeadDetail | null> {
     const [lead, quotationSuggestions] = await Promise.all([
       this.prisma.lead.findUnique({
@@ -316,10 +331,29 @@ export class PrismaLeadRepository implements LeadRepository {
   }
 
   async updateLeadOutcome(input: UpdateLeadOutcomeRecordInput): Promise<LeadDetail> {
-    const updated = await this.prisma.$transaction(async (tx) => {
+    const persisted = await this.persistLeadOutcome(input);
+    const detail = await this.getLeadDetail(input.dataScope, persisted.lead.id);
+
+    if (!detail) {
+      throw new Error(`Lead ${persisted.lead.id} was not found after update.`);
+    }
+
+    return detail;
+  }
+
+  async updateLeadOutcomeAck(input: UpdateLeadOutcomeRecordInput): Promise<LeadSaveAck> {
+    const persisted = await this.persistLeadOutcome(input);
+    return this.toLeadSaveAck(persisted.existing, persisted.lead, input);
+  }
+
+  private async persistLeadOutcome(input: UpdateLeadOutcomeRecordInput): Promise<{ existing: LeadWithCustomer; lead: DbLead }> {
+    return this.prisma.$transaction(async (tx) => {
       const existing = await tx.lead.findUnique({
         where: { id: input.leadId },
-        include: { customer: true },
+        include: {
+          customer: true,
+          assignedTo: { select: { name: true } },
+        },
       });
 
       if (!existing || existing.dataScope !== toDbDataScope(input.dataScope)) {
@@ -550,16 +584,11 @@ export class PrismaLeadRepository implements LeadRepository {
         });
       }
 
-      return lead;
+      return {
+        existing: existing as LeadWithCustomer,
+        lead,
+      };
     });
-
-    const detail = await this.getLeadDetail(input.dataScope, updated.id);
-
-    if (!detail) {
-      throw new Error(`Lead ${updated.id} was not found after update.`);
-    }
-
-    return detail;
   }
 
   private whereForQueue(dataScope: DataScope, queue: LeadQueue) {
@@ -628,7 +657,7 @@ export class PrismaLeadRepository implements LeadRepository {
     };
   }
 
-  private toLeadDetail(lead: LeadWithCustomer, quotationSuggestions: QuotationSuggestion): LeadDetail {
+  private toLeadWorkflowState(lead: LeadWithCustomer): LeadWorkflowState {
     return {
       ...this.toRawLeadListItem(lead),
       leadCycleNumber: lead.leadCycleNumber,
@@ -637,6 +666,35 @@ export class PrismaLeadRepository implements LeadRepository {
       spokenCount: lead.spokenCount,
       isArchived: lead.isArchived,
       archiveCategory: lead.archiveCategory,
+    };
+  }
+
+  private toLeadSaveAck(existing: LeadWithCustomer, lead: DbLead, input: UpdateLeadOutcomeRecordInput): LeadSaveAck {
+    return {
+      id: lead.id,
+      dataScope: toAppDataScope(lead.dataScope),
+      customerId: lead.customerId,
+      customerName: existing.customer.businessName,
+      phoneNormalized: existing.customer.primaryPhoneNormalized,
+      source: lead.source,
+      currentStage: lead.currentStage,
+      currentIntent: lead.currentIntent,
+      priority: lead.priority,
+      nextFollowUpAt: lead.nextFollowUpAt,
+      followUpReason: lead.followUpReason,
+      notReceivingCount: lead.notReceivingCount,
+      assignedToName: existing.assignedTo?.name ?? null,
+      lastActivitySummary: input.activitySummary,
+      createdAt: lead.createdAt,
+      updatedAt: lead.updatedAt,
+      savedAt: input.now,
+      serverConfirmed: true,
+    };
+  }
+
+  private toLeadDetail(lead: LeadWithCustomer, quotationSuggestions: QuotationSuggestion): LeadDetail {
+    return {
+      ...this.toLeadWorkflowState(lead),
       latestQuotation: lead.quotations?.[0] ? this.toQuotationSnapshot(lead.quotations[0]) : null,
       wonDetails: lead.wonDetails ? this.toWonDetailsSnapshot(lead.wonDetails) : null,
       quotationSuggestions,

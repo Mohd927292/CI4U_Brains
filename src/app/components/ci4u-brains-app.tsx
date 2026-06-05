@@ -34,6 +34,7 @@ import {
   type ImportRowInput,
   type LeadDetail,
   type LeadQueue,
+  type LeadSaveAck,
   type QueueCounts,
   type RawLeadListItem,
   type SaveCallOutcomeInput,
@@ -57,6 +58,7 @@ const emptyQueueCounts: QueueCounts = {
   HOT_INSTALLATION: 0,
   HOT_REPAIR_SERVICE: 0,
   UNANSWERED: 0,
+  GHOSTING: 0,
   WON: 0,
   LOST: 0,
   ARCHIVE: 0,
@@ -117,6 +119,7 @@ export function Ci4uBrainsApp() {
   const [error, setError] = useState<string | null>(null);
   const [workMessage, setWorkMessage] = useState<string | null>(null);
   const [failedSave, setFailedSave] = useState<FailedBackgroundSave | null>(null);
+  const [pendingSaveCount, setPendingSaveCount] = useState(0);
   const leadDetailCache = useRef<Map<string, LeadDetail>>(new Map());
 
   const loadCounts = useCallback(async (activeSession = session) => {
@@ -130,6 +133,10 @@ export function Ci4uBrainsApp() {
       setQueueCounts(emptyQueueCounts);
     }
   }, [session]);
+
+  const refreshPendingSaveCount = useCallback(() => {
+    setPendingSaveCount(readPendingBackgroundSaves().length);
+  }, []);
 
   const prefetchLeadDetails = useCallback(async (leads: RawLeadListItem[], activeSession: DevSession, limit = 4) => {
     const candidates = leads.filter((leadItem) => !leadDetailCache.current.has(leadItem.id)).slice(0, limit);
@@ -174,11 +181,26 @@ export function Ci4uBrainsApp() {
   }, []);
 
   useEffect(() => {
+    function warnIfSaveIsPending(event: BeforeUnloadEvent) {
+      if (!readPendingBackgroundSaves().length) {
+        return;
+      }
+
+      event.preventDefault();
+      event.returnValue = "";
+    }
+
+    window.addEventListener("beforeunload", warnIfSaveIsPending);
+    return () => window.removeEventListener("beforeunload", warnIfSaveIsPending);
+  }, []);
+
+  useEffect(() => {
     if (!session) {
       return;
     }
 
     const pending = readPendingBackgroundSaves();
+    const pendingCountTimer = window.setTimeout(() => setPendingSaveCount(pending.length), 0);
     const pendingTimer = pending.length
       ? window.setTimeout(() => {
           setFailedSave(pending[0] ?? null);
@@ -195,6 +217,7 @@ export function Ci4uBrainsApp() {
         window.clearTimeout(pendingTimer);
       }
 
+      window.clearTimeout(pendingCountTimer);
       window.clearTimeout(timer);
     };
   }, [activeQueue, loadQueue, session]);
@@ -269,6 +292,7 @@ export function Ci4uBrainsApp() {
     setQueueCounts(emptyQueueCounts);
     setSelectedLead(null);
     setFailedSave(null);
+    setPendingSaveCount(0);
     leadDetailCache.current.clear();
     setActiveView("dashboard");
   }
@@ -288,13 +312,14 @@ export function Ci4uBrainsApp() {
     const nextLead = getNextLeadItem(queueSnapshot, lead.id);
     setError(null);
     setFailedSave(null);
-    setWorkMessage(`Saving ${lead.customerName} in the background. You can continue with the next lead.`);
+    setWorkMessage(`Saving ${lead.customerName}. Local handoff is done; waiting for server confirmation.`);
     rememberBackgroundSave({
       lead,
       payload,
       queue: queueBeforeSave,
       message: "This save is queued locally and waiting for server confirmation.",
     });
+    refreshPendingSaveCount();
     setRawLeads((current) => current.filter((leadItem) => leadItem.id !== lead.id));
     setQueueCounts((current) => ({
       ...current,
@@ -339,22 +364,24 @@ export function Ci4uBrainsApp() {
     }
 
     try {
-      const updated = await apiPost<LeadDetail>(`/leads/${lead.id}/call-outcome`, session, payload);
-      leadDetailCache.current.set(updated.id, updated);
+      const ack = await apiPost<LeadSaveAck>(`/leads/${lead.id}/call-outcome/ack`, session, payload);
+      leadDetailCache.current.delete(ack.id);
       forgetBackgroundSave(lead.id);
+      refreshPendingSaveCount();
       const nextPending = readPendingBackgroundSaves()[0] ?? null;
       setFailedSave(nextPending);
-      setWorkMessage(`${lead.customerName} saved as ${formatEnum(updated.currentStage)}.`);
-      await loadCounts(session);
+      setWorkMessage(`${lead.customerName} saved as ${formatEnum(ack.currentStage)}. Server confirmed.`);
+      void loadCounts(session);
       window.setTimeout(() => setWorkMessage(null), 2500);
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : "Background save failed.";
       const failed = { lead, payload, queue, message };
       rememberBackgroundSave(failed);
+      refreshPendingSaveCount();
       setFailedSave(failed);
       setError(`Background save failed for ${lead.customerName}: ${message}`);
       setRawLeads((current) => (current.some((leadItem) => leadItem.id === lead.id) ? current : [leadDetailToListItem(lead), ...current]));
-      await loadCounts(session);
+      void loadCounts(session);
     }
   }
 
@@ -401,6 +428,7 @@ export function Ci4uBrainsApp() {
             <NavButton active={activeView === "raw-leads" && activeQueue === "HOT_INSTALLATION"} icon={CalendarClock} label="Hot Installation" count={queueCounts.HOT_INSTALLATION} onClick={() => openQueue("HOT_INSTALLATION")} />
             <NavButton active={activeView === "raw-leads" && activeQueue === "HOT_REPAIR_SERVICE"} icon={CalendarClock} label="Repair / Service" count={queueCounts.HOT_REPAIR_SERVICE} onClick={() => openQueue("HOT_REPAIR_SERVICE")} />
             <NavButton active={activeView === "raw-leads" && activeQueue === "UNANSWERED"} icon={AlertTriangle} label="Unanswered" count={queueCounts.UNANSWERED} onClick={() => openQueue("UNANSWERED")} />
+            <NavButton active={activeView === "raw-leads" && activeQueue === "GHOSTING"} icon={AlertTriangle} label="Ghosting Leads" count={queueCounts.GHOSTING} onClick={() => openQueue("GHOSTING")} />
             <NavButton active={activeView === "raw-leads" && activeQueue === "WON"} icon={CheckCircle2} label="Won Leads" count={queueCounts.WON} onClick={() => openQueue("WON")} />
             <NavButton active={activeView === "raw-leads" && activeQueue === "LOST"} icon={AlertTriangle} label="Lost Leads" count={queueCounts.LOST} onClick={() => openQueue("LOST")} />
             <NavButton active={activeView === "raw-leads" && activeQueue === "ARCHIVE"} icon={ArchiveRestore} label="Trash / Archive" count={queueCounts.ARCHIVE} onClick={() => openQueue("ARCHIVE")} />
@@ -412,6 +440,7 @@ export function Ci4uBrainsApp() {
           <div className="mx-auto flex w-full max-w-[1540px] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
             {error ? <Notice tone="danger" title="Action blocked" message={error} /> : null}
             {failedSave ? <SaveFailureBanner failure={failedSave} onRetry={retryFailedSave} onReopen={reopenFailedSaveLead} /> : null}
+            {!failedSave && pendingSaveCount > 0 ? <SavePendingBanner count={pendingSaveCount} /> : null}
             {workMessage ? <Notice tone="success" title="Workflow progress" message={workMessage} /> : null}
             {loading ? <LoadingBar /> : null}
             {activeView === "dashboard" ? (
@@ -892,6 +921,28 @@ function SaveFailureBanner({
         <div className="flex shrink-0 flex-wrap gap-2">
           <button className="secondary-button" type="button" onClick={onRetry}>Retry Save</button>
           <button className="secondary-button" type="button" onClick={onReopen}>Reopen Lead</button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SavePendingBanner({ count }: { count: number }) {
+  return (
+    <section className="rounded-md border border-cyan-300/25 bg-cyan-400/10 p-4 text-cyan-50 shadow-[0_16px_48px_rgba(8,145,178,0.12)]">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div className="flex items-start gap-3">
+          <Loader2 className="mt-0.5 h-5 w-5 shrink-0 animate-spin" />
+          <div>
+            <div className="font-semibold">Server confirmation pending</div>
+            <p className="mt-1 text-sm text-cyan-100/90">
+              {count} lead save{count === 1 ? "" : "s"} are protected locally and waiting for the backend ACK. Do not close this CRM until the confirmation message appears.
+            </p>
+            <p className="mt-1 text-xs text-cyan-100/70">The browser will warn before closing while a save is pending.</p>
+          </div>
+        </div>
+        <div className="rounded-md border border-cyan-200/20 bg-[#031023]/60 px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-cyan-100">
+          Durable Save
         </div>
       </div>
     </section>
@@ -1935,6 +1986,7 @@ function queueTitle(queue: LeadQueue): string {
     HOT_INSTALLATION: "Hot Installation Leads",
     HOT_REPAIR_SERVICE: "Repair / Service Leads",
     UNANSWERED: "Unanswered Leads",
+    GHOSTING: "Ghosting Leads",
     WON: "Won Leads",
     LOST: "Lost Leads",
     ARCHIVE: "Trash / Archive",

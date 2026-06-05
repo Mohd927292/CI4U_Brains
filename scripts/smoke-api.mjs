@@ -60,6 +60,10 @@ async function saveOutcome(leadId, body) {
   return request("POST", `/leads/${leadId}/call-outcome`, body);
 }
 
+async function saveOutcomeAck(leadId, body) {
+  return request("POST", `/leads/${leadId}/call-outcome/ack`, body);
+}
+
 const now = new Date();
 const inMs = (milliseconds) => new Date(now.getTime() + milliseconds).toISOString();
 
@@ -67,7 +71,7 @@ await request("GET", "/health", undefined, false);
 await expectFailure(() => request("GET", "/leads/counts", undefined, false), "DEV_DATA_SCOPE_REQUIRED");
 
 const warmLead = await createLead("Smoke Warm", 1);
-const warm = await saveOutcome(warmLead.id, {
+const warm = await saveOutcomeAck(warmLead.id, {
   callOutcome: "SPOKE",
   conversationSummary: "Customer asked to reconnect next month.",
   leadIntent: "WARM",
@@ -75,6 +79,7 @@ const warm = await saveOutcome(warmLead.id, {
 assert(warm.currentStage === "WARM", "warm lead moves to WARM");
 assert(warm.followUpReason === "NURTURE", "warm lead uses NURTURE");
 assert(Boolean(warm.nextFollowUpAt), "warm lead gets default follow-up");
+assert(warm.serverConfirmed === true, "fast save ack confirms durable server write");
 
 const quotationLead = await createLead("Smoke Quotation", 2);
 const quotation = await saveOutcome(quotationLead.id, {

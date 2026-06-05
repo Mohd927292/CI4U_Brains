@@ -62,6 +62,15 @@ export class LeadsController {
     }
   }
 
+  @Post(":leadId/call-outcome/ack")
+  async saveCallOutcomeAck(@Req() req: Request, @Param("leadId") leadId: string, @Body() body: SaveCallOutcomeInput) {
+    try {
+      return await this.leadIntakeService.saveCallOutcomeAck(requireDataScope(req), leadId, body);
+    } catch (error) {
+      throw this.toBadRequest(error);
+    }
+  }
+
   @Post("import/preview")
   async previewImport(@Req() req: Request, @Body() body: { rows?: ImportPreviewRowInput[] }) {
     if (!Array.isArray(body.rows)) {

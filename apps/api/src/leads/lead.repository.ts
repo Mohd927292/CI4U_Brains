@@ -6,6 +6,8 @@ import {
   type ExistingPhoneRecord,
   type LeadDetail,
   type LeadQueue,
+  type LeadSaveAck,
+  type LeadWorkflowState,
   type QuotationSnapshot,
   type QuotationSuggestion,
   type QueueCounts,
@@ -22,8 +24,10 @@ export interface LeadRepository {
   listRawLeads(dataScope: DataScope): Promise<RawLeadListItem[]>;
   listLeadsByQueue(dataScope: DataScope, queue: LeadQueue): Promise<RawLeadListItem[]>;
   getQueueCounts(dataScope: DataScope): Promise<QueueCounts>;
+  getLeadWorkflowState(dataScope: DataScope, leadId: string): Promise<LeadWorkflowState | null>;
   getLeadDetail(dataScope: DataScope, leadId: string): Promise<LeadDetail | null>;
   updateLeadOutcome(input: UpdateLeadOutcomeRecordInput): Promise<LeadDetail>;
+  updateLeadOutcomeAck(input: UpdateLeadOutcomeRecordInput): Promise<LeadSaveAck>;
 }
 
 export class DuplicatePhoneConflictError extends Error {
@@ -177,6 +181,24 @@ export class InMemoryLeadRepository implements LeadRepository {
     };
   }
 
+  async getLeadWorkflowState(dataScope: DataScope, leadId: string): Promise<LeadWorkflowState | null> {
+    const lead = this.leads.get(leadId);
+
+    if (!lead || lead.dataScope !== dataScope) {
+      return null;
+    }
+
+    return {
+      ...this.toRawLeadListItem(lead),
+      leadCycleNumber: lead.leadCycleNumber,
+      siteVisitStatus: lead.siteVisitStatus,
+      siteVisitScheduledAt: lead.siteVisitScheduledAt,
+      spokenCount: lead.spokenCount,
+      isArchived: lead.isArchived,
+      archiveCategory: lead.archiveCategory,
+    };
+  }
+
   async updateLeadOutcome(input: UpdateLeadOutcomeRecordInput): Promise<LeadDetail> {
     const lead = this.leads.get(input.leadId);
 
@@ -247,6 +269,31 @@ export class InMemoryLeadRepository implements LeadRepository {
     }
 
     return detail;
+  }
+
+  async updateLeadOutcomeAck(input: UpdateLeadOutcomeRecordInput): Promise<LeadSaveAck> {
+    const updated = await this.updateLeadOutcome(input);
+
+    return {
+      id: updated.id,
+      dataScope: updated.dataScope,
+      customerId: updated.customerId,
+      customerName: updated.customerName,
+      phoneNormalized: updated.phoneNormalized,
+      source: updated.source,
+      currentStage: updated.currentStage,
+      currentIntent: updated.currentIntent,
+      priority: updated.priority,
+      nextFollowUpAt: updated.nextFollowUpAt,
+      followUpReason: updated.followUpReason,
+      notReceivingCount: updated.notReceivingCount,
+      assignedToName: updated.assignedToName,
+      lastActivitySummary: input.activitySummary,
+      createdAt: updated.createdAt,
+      updatedAt: updated.updatedAt,
+      savedAt: input.now,
+      serverConfirmed: true,
+    };
   }
 
   seedExistingPhone(record: ExistingPhoneRecord): void {
