@@ -71,6 +71,11 @@ type FailedBackgroundSave = {
   message: string;
 };
 
+type QueueLoadOptions = {
+  preferCache?: boolean;
+  refreshCounts?: boolean;
+};
+
 function readPendingBackgroundSaves(): FailedBackgroundSave[] {
   if (typeof window === "undefined") {
     return [];
@@ -115,12 +120,15 @@ export function Ci4uBrainsApp() {
   const [rawLeads, setRawLeads] = useState<RawLeadListItem[]>([]);
   const [queueCounts, setQueueCounts] = useState<QueueCounts>(emptyQueueCounts);
   const [selectedLead, setSelectedLead] = useState<LeadDetail | null>(null);
+  const [queueLoading, setQueueLoading] = useState<LeadQueue | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [workMessage, setWorkMessage] = useState<string | null>(null);
   const [failedSave, setFailedSave] = useState<FailedBackgroundSave | null>(null);
   const [pendingSaveCount, setPendingSaveCount] = useState(0);
   const leadDetailCache = useRef<Map<string, LeadDetail>>(new Map());
+  const queueCache = useRef<Map<LeadQueue, RawLeadListItem[]>>(new Map());
+  const queueRequestId = useRef(0);
 
   const loadCounts = useCallback(async (activeSession = session) => {
     if (!activeSession) {
@@ -149,26 +157,48 @@ export function Ci4uBrainsApp() {
     );
   }, []);
 
-  const loadQueue = useCallback(async (queue: LeadQueue = activeQueue, activeSession = session) => {
+  const loadQueue = useCallback(async (queue: LeadQueue, activeSession = session, options: QueueLoadOptions = {}) => {
     if (!activeSession) {
       return;
     }
 
-    setLoading(true);
+    const requestId = queueRequestId.current + 1;
+    queueRequestId.current = requestId;
+    const cachedRows = queueCache.current.get(queue);
+
+    setActiveQueue(queue);
+    setQueueLoading(queue);
     setError(null);
+
+    if (options.preferCache && cachedRows) {
+      setRawLeads(cachedRows);
+      void prefetchLeadDetails(cachedRows, activeSession);
+    }
 
     try {
       const leads = await apiGet<RawLeadListItem[]>(`/leads/queue/${queue}`, activeSession);
+
+      if (queueRequestId.current !== requestId) {
+        return;
+      }
+
+      queueCache.current.set(queue, leads);
       setRawLeads(leads);
-      setActiveQueue(queue);
       void prefetchLeadDetails(leads, activeSession);
-      await loadCounts(activeSession);
+
+      if (options.refreshCounts !== false) {
+        void loadCounts(activeSession);
+      }
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not load leads.");
+      if (queueRequestId.current === requestId) {
+        setError(loadError instanceof Error ? loadError.message : "Could not load leads.");
+      }
     } finally {
-      setLoading(false);
+      if (queueRequestId.current === requestId) {
+        setQueueLoading(null);
+      }
     }
-  }, [activeQueue, loadCounts, prefetchLeadDetails, session]);
+  }, [loadCounts, prefetchLeadDetails, session]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -209,7 +239,7 @@ export function Ci4uBrainsApp() {
       : null;
 
     const timer = window.setTimeout(() => {
-      void loadQueue(activeQueue, session);
+      void loadQueue("RAW", session, { preferCache: true });
     }, 0);
 
     return () => {
@@ -220,7 +250,7 @@ export function Ci4uBrainsApp() {
       window.clearTimeout(pendingCountTimer);
       window.clearTimeout(timer);
     };
-  }, [activeQueue, loadQueue, session]);
+  }, [loadQueue, session]);
 
   function prefetchAdjacentLeads(currentLeadId: string, queueSnapshot = rawLeads, activeSession = session) {
     if (!activeSession) {
@@ -281,7 +311,7 @@ export function Ci4uBrainsApp() {
     };
     window.localStorage.setItem(sessionStorageKey, JSON.stringify(nextSession));
     setSession(nextSession);
-    void loadQueue("RAW", nextSession);
+    void loadQueue("RAW", nextSession, { preferCache: true });
   }
 
   function logout() {
@@ -291,15 +321,17 @@ export function Ci4uBrainsApp() {
     setRawLeads([]);
     setQueueCounts(emptyQueueCounts);
     setSelectedLead(null);
+    setQueueLoading(null);
     setFailedSave(null);
     setPendingSaveCount(0);
     leadDetailCache.current.clear();
+    queueCache.current.clear();
     setActiveView("dashboard");
   }
 
   function openQueue(queue: LeadQueue) {
     setActiveView("raw-leads");
-    void loadQueue(queue);
+    void loadQueue(queue, session, { preferCache: true });
   }
 
   function handleLeadUpdateRequested(lead: LeadDetail, payload: SaveCallOutcomeInput) {
@@ -320,6 +352,7 @@ export function Ci4uBrainsApp() {
       message: "This save is queued locally and waiting for server confirmation.",
     });
     refreshPendingSaveCount();
+    removeLeadFromQueueCache(queueBeforeSave, lead.id);
     setRawLeads((current) => current.filter((leadItem) => leadItem.id !== lead.id));
     setQueueCounts((current) => ({
       ...current,
@@ -366,6 +399,7 @@ export function Ci4uBrainsApp() {
     try {
       const ack = await apiPost<LeadSaveAck>(`/leads/${lead.id}/call-outcome/ack`, session, payload);
       leadDetailCache.current.delete(ack.id);
+      upsertLeadInQueueCache(queueForLeadListItem(ack), ack);
       forgetBackgroundSave(lead.id);
       refreshPendingSaveCount();
       const nextPending = readPendingBackgroundSaves()[0] ?? null;
@@ -380,9 +414,30 @@ export function Ci4uBrainsApp() {
       refreshPendingSaveCount();
       setFailedSave(failed);
       setError(`Background save failed for ${lead.customerName}: ${message}`);
+      upsertLeadInQueueCache(queue, leadDetailToListItem(lead));
       setRawLeads((current) => (current.some((leadItem) => leadItem.id === lead.id) ? current : [leadDetailToListItem(lead), ...current]));
       void loadCounts(session);
     }
+  }
+
+  function removeLeadFromQueueCache(queue: LeadQueue, leadId: string) {
+    const cached = queueCache.current.get(queue);
+
+    if (!cached) {
+      return;
+    }
+
+    queueCache.current.set(queue, cached.filter((leadItem) => leadItem.id !== leadId));
+  }
+
+  function upsertLeadInQueueCache(queue: LeadQueue, leadItem: RawLeadListItem) {
+    const cached = queueCache.current.get(queue);
+
+    if (!cached) {
+      return;
+    }
+
+    queueCache.current.set(queue, [leadItem, ...cached.filter((item) => item.id !== leadItem.id)]);
   }
 
   function retryFailedSave() {
@@ -442,7 +497,7 @@ export function Ci4uBrainsApp() {
             {failedSave ? <SaveFailureBanner failure={failedSave} onRetry={retryFailedSave} onReopen={reopenFailedSaveLead} /> : null}
             {!failedSave && pendingSaveCount > 0 ? <SavePendingBanner count={pendingSaveCount} /> : null}
             {workMessage ? <Notice tone="success" title="Workflow progress" message={workMessage} /> : null}
-            {loading ? <LoadingBar /> : null}
+            {loading && activeView !== "raw-leads" ? <LoadingBar /> : null}
             {activeView === "dashboard" ? (
               <DashboardHome counts={queueCounts} onOpenQueue={openQueue} />
             ) : null}
@@ -451,8 +506,9 @@ export function Ci4uBrainsApp() {
                 session={session}
                 activeQueue={activeQueue}
                 rawLeads={rawLeads}
-                onRefresh={() => loadQueue(activeQueue)}
-                onLeadCreated={() => loadQueue("RAW")}
+                queueLoading={queueLoading === activeQueue}
+                onRefresh={() => loadQueue(activeQueue, session, { preferCache: true })}
+                onLeadCreated={() => loadQueue("RAW", session, { preferCache: true })}
                 onOpenLead={openLead}
               />
             ) : null}
@@ -671,6 +727,7 @@ function RawLeadsWorkspace({
   session,
   activeQueue,
   rawLeads,
+  queueLoading,
   onRefresh,
   onLeadCreated,
   onOpenLead,
@@ -678,6 +735,7 @@ function RawLeadsWorkspace({
   session: DevSession;
   activeQueue: LeadQueue;
   rawLeads: RawLeadListItem[];
+  queueLoading: boolean;
   onRefresh: () => void;
   onLeadCreated: () => void;
   onOpenLead: (leadId: string) => void;
@@ -838,15 +896,18 @@ function RawLeadsWorkspace({
         <Panel
           title={queueTitle(activeQueue)}
           action={
-            <button className="secondary-button" onClick={onRefresh}>
-              <RefreshCw className="h-4 w-4" />
-              Refresh
-            </button>
+            <div className="flex flex-wrap items-center gap-3">
+              {queueLoading ? <span className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200">Syncing</span> : null}
+              <button className="secondary-button" disabled={queueLoading} onClick={onRefresh}>
+                <RefreshCw className={`h-4 w-4 ${queueLoading ? "animate-spin" : ""}`} />
+                Refresh
+              </button>
+            </div>
           }
         >
-          <div className="overflow-x-auto rounded-md border border-white/10">
+          <div className="smooth-scroll max-h-[min(72vh,760px)] overflow-auto rounded-md border border-white/10">
             <table className="w-full min-w-[760px] border-collapse text-left text-sm">
-              <thead className="bg-white/[0.04] text-xs uppercase text-slate-400">
+              <thead className="sticky top-0 z-10 bg-[#08162c] text-xs uppercase text-slate-400 shadow-[0_1px_0_rgba(255,255,255,0.08)]">
                 <tr>
                   <th className="px-4 py-3">Customer</th>
                   <th className="px-4 py-3">Phone</th>
@@ -857,6 +918,7 @@ function RawLeadsWorkspace({
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/10">
+                {queueLoading && !rawLeads.length ? <QueueSkeletonRows /> : null}
                 {rawLeads.map((lead) => (
                   <tr key={lead.id} className="hover:bg-white/[0.03]">
                     <td className="px-4 py-3 font-semibold">{lead.customerName}</td>
@@ -871,7 +933,7 @@ function RawLeadsWorkspace({
                     </td>
                   </tr>
                 ))}
-                {!rawLeads.length ? (
+                {!rawLeads.length && !queueLoading ? (
                   <tr>
                     <td className="px-4 py-8 text-center text-slate-400" colSpan={6}>
                       {activeQueue === "RAW" ? "No raw leads yet. Add manually or import your CSV/XLSX file." : `No records in ${queueTitle(activeQueue)} yet.`}
@@ -898,6 +960,22 @@ function ManualResult({ result }: { result: CreateLeadResponse }) {
       title="Existing phone found"
       message={`${result.duplicate.customerName} already exists at stage ${formatEnum(result.duplicate.currentStage)}. Do not create duplicate records.`}
     />
+  );
+}
+
+function QueueSkeletonRows() {
+  return (
+    <>
+      {Array.from({ length: 6 }).map((_, index) => (
+        <tr key={index}>
+          {Array.from({ length: 6 }).map((__, cellIndex) => (
+            <td key={cellIndex} className="px-4 py-3">
+              <div className="h-4 w-full max-w-[180px] animate-pulse rounded bg-white/10" />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
   );
 }
 
@@ -2032,6 +2110,10 @@ function currentQueueForLead(lead: LeadDetail): LeadQueue {
     return "ARCHIVE";
   }
 
+  return queueForLeadListItem(lead);
+}
+
+function queueForLeadListItem(lead: Pick<RawLeadListItem, "currentStage">): LeadQueue {
   if (lead.currentStage === "WARM") {
     return "WARM";
   }
@@ -2046,6 +2128,10 @@ function currentQueueForLead(lead: LeadDetail): LeadQueue {
 
   if (lead.currentStage === "NOT_RECEIVING") {
     return "UNANSWERED";
+  }
+
+  if (lead.currentStage === "GHOSTING") {
+    return "GHOSTING";
   }
 
   if (lead.currentStage === "CAPTURED_WON") {

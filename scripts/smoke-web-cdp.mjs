@@ -97,6 +97,11 @@ try {
   await waitForLeadHandoff(page, `${customerName} - +91${phone}`, 15000);
   const handoffMs = Date.now() - saveStartedAt;
   await waitForText(page, "Workflow progress", 15000);
+  const queueSwitchStartedAt = Date.now();
+  await clickButtonContaining(page, "Warm Leads");
+  await waitForPanelTitle(page, "Warm Leads", 15000);
+  await waitForText(page, customerName, 15000);
+  const queueSwitchMs = Date.now() - queueSwitchStartedAt;
 
   const screenshot = await page.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
   await fs.writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
@@ -111,7 +116,8 @@ try {
         status: "ok",
         webUrl,
         handoffMs,
-        checked: ["dev login", "dashboard", "sidebar toggle-ready layout", "manual raw leads", "lead detail", "warm background save", "instant next-lead handoff", "whatsapp draft"],
+        queueSwitchMs,
+        checked: ["dev login", "dashboard", "sidebar toggle-ready layout", "manual raw leads", "lead detail", "warm background save", "instant next-lead handoff", "warm queue switch", "whatsapp draft"],
         screenshotPath,
       },
       null,
@@ -285,6 +291,22 @@ async function clickButtonByTitle(page, title) {
   if (!clicked) {
     throw new Error(`Could not find button titled "${title}".`);
   }
+}
+
+async function waitForPanelTitle(page, title, timeoutMs) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const found = await evaluate(page, `Array.from(document.querySelectorAll("h2")).some((element) => element.innerText === ${JSON.stringify(title)})`);
+
+    if (found) {
+      return;
+    }
+
+    await sleep(100);
+  }
+
+  throw new Error(`Timed out waiting for panel title "${title}".`);
 }
 
 async function waitForTextareaValue(page, text, timeoutMs) {
