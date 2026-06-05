@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Injectable } from "@nestjs/common";
 import type { DataScope } from "../auth/auth.types";
 import { PrismaService } from "../database/prisma.service";
@@ -12,6 +13,7 @@ import {
   type LeadQuotationPackage as DbLeadQuotationPackage,
   LeadStage as DbLeadStage,
   type PhoneIndex as DbPhoneIndex,
+  Prisma,
   type QuotationItem as DbQuotationItem,
   type QuotationPackageTemplate as DbQuotationPackageTemplate,
   type QuotationPackageTemplateItem as DbQuotationPackageTemplateItem,
@@ -64,6 +66,24 @@ type PhoneIndexWithRelations = DbPhoneIndex & {
     assignedTo?: { name: string } | null;
     activities?: DbLeadActivity[];
   }) | null;
+};
+
+type LeadSaveAckRow = {
+  id: string;
+  data_scope: DbDataScope;
+  customer_id: string;
+  customer_name: string;
+  phone_normalized: string;
+  source: string;
+  current_stage: LeadSaveAck["currentStage"];
+  current_intent: LeadSaveAck["currentIntent"];
+  priority: LeadSaveAck["priority"];
+  next_follow_up_at: Date | null;
+  follow_up_reason: LeadSaveAck["followUpReason"];
+  not_receiving_count: number;
+  assigned_to_name: string | null;
+  created_at: Date;
+  updated_at: Date;
 };
 
 @Injectable()
@@ -342,8 +362,173 @@ export class PrismaLeadRepository implements LeadRepository {
   }
 
   async updateLeadOutcomeAck(input: UpdateLeadOutcomeRecordInput): Promise<LeadSaveAck> {
+    if (this.canUseCompactAck(input)) {
+      return this.updateLeadOutcomeAckCompact(input);
+    }
+
     const persisted = await this.persistLeadOutcome(input);
     return this.toLeadSaveAck(persisted.existing, persisted.lead, input);
+  }
+
+  private canUseCompactAck(input: UpdateLeadOutcomeRecordInput): boolean {
+    return Boolean(
+      input.nextFollowUpAt &&
+        !input.isArchived &&
+        !input.archiveCategory &&
+        !input.whatsappMessageBody &&
+        !input.quotation &&
+        !input.wonDetails,
+    );
+  }
+
+  private async updateLeadOutcomeAckCompact(input: UpdateLeadOutcomeRecordInput): Promise<LeadSaveAck> {
+    const dataScope = toDbDataScope(input.dataScope);
+    const activityId = randomUUID();
+    const followUpId = randomUUID();
+    const updateLastCallAt = input.activityType === "CALL_OUTCOME" || input.activityType === "ARCHIVED";
+
+    const rows = await this.prisma.$queryRaw<LeadSaveAckRow[]>(
+      Prisma.sql`
+        WITH existing AS (
+          SELECT
+            l.*,
+            c.business_name AS customer_name,
+            c.primary_phone_normalized AS phone_normalized,
+            u.name AS assigned_to_name
+          FROM leads l
+          JOIN customers c ON c.id = l.customer_id
+          LEFT JOIN users u ON u.id = l.assigned_to_id
+          WHERE l.id = ${input.leadId}
+            AND l.data_scope = ${dataScope}::"DataScope"
+        ),
+        updated_lead AS (
+          UPDATE leads l
+          SET
+            current_stage = ${input.currentStage}::"LeadStage",
+            current_intent = ${input.currentIntent}::"LeadIntent",
+            priority = ${input.priority}::"LeadPriority",
+            next_follow_up_at = ${input.nextFollowUpAt},
+            follow_up_reason = ${input.followUpReason}::"FollowUpReason",
+            site_visit_status = ${input.siteVisitStatus}::"SiteVisitScheduleStatus",
+            site_visit_scheduled_at = ${input.siteVisitScheduledAt},
+            not_receiving_count = ${input.notReceivingCount},
+            spoken_count = ${input.spokenCount},
+            is_archived = ${input.isArchived},
+            archive_category = ${input.archiveCategory}::"ArchiveCategory",
+            last_call_at = CASE WHEN ${updateLastCallAt} THEN ${input.now} ELSE l.last_call_at END,
+            updated_at = ${input.now}
+          FROM existing
+          WHERE l.id = existing.id
+          RETURNING l.*
+        ),
+        updated_phone AS (
+          UPDATE phone_index p
+          SET
+            current_stage = ${input.currentStage}::"LeadStage",
+            is_active = ${!input.isArchived},
+            is_archived = ${input.isArchived}
+          FROM existing
+          WHERE p.data_scope = ${dataScope}::"DataScope"
+            AND p.phone_normalized = existing.phone_normalized
+          RETURNING p.id
+        ),
+        cancelled_followups AS (
+          UPDATE follow_ups f
+          SET
+            status = 'CANCELLED'::"FollowUpStatus",
+            updated_at = ${input.now}
+          FROM existing
+          WHERE f.data_scope = ${dataScope}::"DataScope"
+            AND f.lead_id = existing.id
+            AND f.status = 'OPEN'::"FollowUpStatus"
+          RETURNING f.id
+        ),
+        created_activity AS (
+          INSERT INTO lead_activities (
+            id,
+            data_scope,
+            lead_id,
+            customer_id,
+            type,
+            old_stage,
+            new_stage,
+            old_intent,
+            new_intent,
+            summary,
+            created_at
+          )
+          SELECT
+            ${activityId},
+            ${dataScope}::"DataScope",
+            existing.id,
+            existing.customer_id,
+            ${input.activityType}::"ActivityType",
+            existing.current_stage,
+            ${input.currentStage}::"LeadStage",
+            existing.current_intent,
+            ${input.currentIntent}::"LeadIntent",
+            ${input.activitySummary},
+            ${input.now}
+          FROM existing
+          RETURNING id
+        ),
+        created_followup AS (
+          INSERT INTO follow_ups (
+            id,
+            data_scope,
+            lead_id,
+            customer_id,
+            due_at,
+            reason,
+            priority,
+            status,
+            assigned_to_id,
+            created_at,
+            updated_at
+          )
+          SELECT
+            ${followUpId},
+            ${dataScope}::"DataScope",
+            existing.id,
+            existing.customer_id,
+            ${input.nextFollowUpAt},
+            ${input.followUpReason ?? "FOLLOW_UP"},
+            ${input.priority}::"LeadPriority",
+            'OPEN'::"FollowUpStatus",
+            existing.assigned_to_id,
+            ${input.now},
+            ${input.now}
+          FROM existing
+          RETURNING id
+        )
+        SELECT
+          updated_lead.id,
+          updated_lead.data_scope,
+          updated_lead.customer_id,
+          existing.customer_name,
+          existing.phone_normalized,
+          updated_lead.source,
+          updated_lead.current_stage,
+          updated_lead.current_intent,
+          updated_lead.priority,
+          updated_lead.next_follow_up_at,
+          updated_lead.follow_up_reason,
+          updated_lead.not_receiving_count,
+          existing.assigned_to_name,
+          updated_lead.created_at,
+          updated_lead.updated_at
+        FROM updated_lead
+        JOIN existing ON existing.id = updated_lead.id
+      `,
+    );
+
+    const row = rows[0];
+
+    if (!row) {
+      throw new Error(`Lead ${input.leadId} was not found.`);
+    }
+
+    return this.toLeadSaveAckFromRow(row, input);
   }
 
   private async persistLeadOutcome(input: UpdateLeadOutcomeRecordInput): Promise<{ existing: LeadWithCustomer; lead: DbLead }> {
@@ -687,6 +872,29 @@ export class PrismaLeadRepository implements LeadRepository {
       lastActivitySummary: input.activitySummary,
       createdAt: lead.createdAt,
       updatedAt: lead.updatedAt,
+      savedAt: input.now,
+      serverConfirmed: true,
+    };
+  }
+
+  private toLeadSaveAckFromRow(row: LeadSaveAckRow, input: UpdateLeadOutcomeRecordInput): LeadSaveAck {
+    return {
+      id: row.id,
+      dataScope: toAppDataScope(row.data_scope),
+      customerId: row.customer_id,
+      customerName: row.customer_name,
+      phoneNormalized: row.phone_normalized,
+      source: row.source,
+      currentStage: row.current_stage,
+      currentIntent: row.current_intent,
+      priority: row.priority,
+      nextFollowUpAt: row.next_follow_up_at,
+      followUpReason: row.follow_up_reason,
+      notReceivingCount: row.not_receiving_count,
+      assignedToName: row.assigned_to_name,
+      lastActivitySummary: input.activitySummary,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
       savedAt: input.now,
       serverConfirmed: true,
     };
