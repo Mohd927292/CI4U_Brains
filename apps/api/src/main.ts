@@ -30,7 +30,7 @@ function assertSafeAuthMode(): void {
 
   if (authMode === "dev" && isProductionRuntime && !explicitlyAllowed) {
     throw new Error(
-      "CI4U_AUTH_MODE=dev is blocked in NODE_ENV=production. Set CI4U_AUTH_MODE=jwt for real users, or set CI4U_ALLOW_DEV_AUTH_IN_PRODUCTION=true only for a temporary development demo.",
+      "CI4U_AUTH_MODE=dev is blocked in NODE_ENV=production. Set CI4U_AUTH_MODE=supabase or jwt for real users, or set CI4U_ALLOW_DEV_AUTH_IN_PRODUCTION=true only for a temporary development demo.",
     );
   }
 }

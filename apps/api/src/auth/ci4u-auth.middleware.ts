@@ -2,6 +2,7 @@ import { Injectable, NestMiddleware } from "@nestjs/common";
 import type { NextFunction, Request, Response } from "express";
 import jwt, { type Algorithm, type JwtPayload } from "jsonwebtoken";
 import jwksClient from "jwks-rsa";
+import { createClient, type SupabaseClient, type User } from "@supabase/supabase-js";
 import type { DataScope, UserRole } from "./auth.types";
 
 const allowedRoles: ReadonlySet<UserRole> = new Set([
@@ -23,6 +24,7 @@ const allowedRoles: ReadonlySet<UserRole> = new Set([
 
 const jwtAlgorithms: Algorithm[] = ["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"];
 const jwksClients = new Map<string, jwksClient.JwksClient>();
+let supabaseAuthClient: SupabaseClient | null = null;
 
 @Injectable()
 export class Ci4uAuthMiddleware implements NestMiddleware {
@@ -44,9 +46,14 @@ export class Ci4uAuthMiddleware implements NestMiddleware {
       return;
     }
 
+    if (authMode === "supabase") {
+      await this.handleSupabaseAuth(req, res, next);
+      return;
+    }
+
     res.status(503).json({
       code: "AUTH_MODE_INVALID",
-      message: "CI4U_AUTH_MODE must be either dev or jwt.",
+      message: "CI4U_AUTH_MODE must be dev, jwt, or supabase.",
     });
   }
 
@@ -72,13 +79,14 @@ export class Ci4uAuthMiddleware implements NestMiddleware {
       return;
     }
 
-    req.user = {
-      id: userId,
-      name: userName,
-      role,
-      dataScope: "development",
-      authProvider: "dev",
-    };
+      req.user = {
+        id: userId,
+        name: userName,
+        role,
+        dataScope: "development",
+        authProvider: "dev",
+        authSubject: userId,
+      };
     res.setHeader("x-ci4u-data-scope", "development");
     next();
   }
@@ -130,12 +138,15 @@ export class Ci4uAuthMiddleware implements NestMiddleware {
         return;
       }
 
+      const email = getJwtEmail(payload);
       req.user = {
         id: userId,
         name: getJwtDisplayName(payload),
         role: getJwtUserRole(payload),
         dataScope,
         authProvider: "jwt",
+        authSubject: userId,
+        ...(email ? { email } : {}),
       };
       res.setHeader("x-ci4u-data-scope", dataScope);
       next();
@@ -145,6 +156,52 @@ export class Ci4uAuthMiddleware implements NestMiddleware {
         message: "The auth token is missing, expired, or not trusted by this CI4U API environment.",
       });
     }
+  }
+
+  private async handleSupabaseAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const authHeader = getHeader(req, "authorization");
+
+    if (!authHeader?.startsWith("Bearer ")) {
+      res.status(401).json({
+        code: "AUTH_TOKEN_REQUIRED",
+        message: "Production auth requires an Authorization: Bearer token.",
+      });
+      return;
+    }
+
+    const dataScope = parseConfiguredDataScope(process.env.CI4U_DATA_SCOPE ?? "production");
+    const client = getSupabaseAuthClient();
+
+    if (!client || !dataScope) {
+      res.status(503).json({
+        code: "AUTH_CONFIG_REQUIRED",
+        message: "Supabase auth requires CI4U_SUPABASE_URL, CI4U_SUPABASE_PUBLISHABLE_KEY or CI4U_SUPABASE_ANON_KEY, and a valid CI4U_DATA_SCOPE.",
+      });
+      return;
+    }
+
+    const token = authHeader.slice("Bearer ".length).trim();
+    const { data, error } = await client.auth.getUser(token);
+
+    if (error || !data.user) {
+      res.status(401).json({
+        code: "AUTH_TOKEN_INVALID",
+        message: "The Supabase auth token is missing, expired, or not trusted by this CI4U API environment.",
+      });
+      return;
+    }
+
+    req.user = {
+      id: data.user.id,
+      name: getSupabaseDisplayName(data.user),
+      role: getSupabaseUserRole(data.user),
+      dataScope,
+      authProvider: "supabase",
+      authSubject: data.user.id,
+      ...(data.user.email ? { email: data.user.email.toLowerCase() } : {}),
+    };
+    res.setHeader("x-ci4u-data-scope", dataScope);
+    next();
   }
 }
 
@@ -173,13 +230,70 @@ function parseConfiguredDataScope(value: string): DataScope | null {
 function getJwtUserRole(payload: JwtPayload): UserRole {
   const roleClaimPath = process.env.CI4U_AUTH_ROLE_CLAIM ?? "app_metadata.ci4u_role";
   const claimValue = getClaimByPath(payload, roleClaimPath);
+  const email = getJwtEmail(payload);
+  const founderEmail = (process.env.CI4U_FOUNDER_EMAIL ?? "syedci4u@gmail.com").trim().toLowerCase();
 
-  return typeof claimValue === "string" && isUserRole(claimValue) ? claimValue : "VIEWER";
+  if (typeof claimValue === "string" && isUserRole(claimValue)) {
+    return claimValue;
+  }
+
+  if (email && founderEmail && email.toLowerCase() === founderEmail) {
+    return "FOUNDER";
+  }
+
+  return "VIEWER";
 }
 
 function getJwtDisplayName(payload: JwtPayload): string {
   const name = payload.name ?? payload.email ?? payload.phone;
   return typeof name === "string" && name.trim() ? name : "Authenticated User";
+}
+
+function getJwtEmail(payload: JwtPayload): string | null {
+  return typeof payload.email === "string" && payload.email.trim() ? payload.email.trim().toLowerCase() : null;
+}
+
+function getSupabaseUserRole(user: User): UserRole {
+  const claimValue = user.app_metadata?.ci4u_role;
+  const email = user.email?.toLowerCase() ?? null;
+  const founderEmail = (process.env.CI4U_FOUNDER_EMAIL ?? "syedci4u@gmail.com").trim().toLowerCase();
+
+  if (typeof claimValue === "string" && isUserRole(claimValue)) {
+    return claimValue;
+  }
+
+  if (email && founderEmail && email === founderEmail) {
+    return "FOUNDER";
+  }
+
+  return "VIEWER";
+}
+
+function getSupabaseDisplayName(user: User): string {
+  const name = user.user_metadata?.name ?? user.email ?? user.phone;
+  return typeof name === "string" && name.trim() ? name.trim() : "Authenticated User";
+}
+
+function getSupabaseAuthClient(): SupabaseClient | null {
+  if (supabaseAuthClient) {
+    return supabaseAuthClient;
+  }
+
+  const supabaseUrl = process.env.CI4U_SUPABASE_URL;
+  const publicKey = process.env.CI4U_SUPABASE_PUBLISHABLE_KEY ?? process.env.CI4U_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !publicKey) {
+    return null;
+  }
+
+  supabaseAuthClient = createClient(supabaseUrl, publicKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
+
+  return supabaseAuthClient;
 }
 
 function getClaimByPath(payload: JwtPayload, path: string): unknown {

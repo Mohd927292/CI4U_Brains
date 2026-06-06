@@ -1,17 +1,61 @@
 export type DevRole =
   | "FOUNDER"
+  | "SUPER_ADMIN"
   | "ADMIN"
+  | "MANAGEMENT"
+  | "SALES_HEAD"
   | "SALES_MANAGER"
   | "SALES_EXECUTIVE"
+  | "OPERATIONS_HEAD"
   | "OPERATIONS_MANAGER"
+  | "OPERATIONS_EXECUTIVE"
   | "VENDOR_MANAGER"
+  | "ACCOUNTS_EXECUTIVE"
+  | "SUPPORT_STAFF"
   | "VIEWER";
 
 export type DevSession = {
   userId: string;
   name: string;
   role: DevRole;
-  dataScope: "development";
+  dataScope: "development" | "production";
+  email?: string | null;
+  accessToken?: string;
+  authMode?: "dev" | "supabase";
+};
+
+export type SessionUser = {
+  id: string;
+  authSubject: string | null;
+  name: string;
+  email: string | null;
+  role: DevRole;
+  dataScope: "development" | "production";
+  status: "ACTIVE" | "INVITED" | "SUSPENDED" | "DEACTIVATED";
+};
+
+export type ManagedUser = SessionUser & {
+  createdAt: string;
+  updatedAt: string;
+  authProvisioning: "SUPABASE_CREATED" | "SUPABASE_INVITED" | "LOCAL_ONLY" | "SYNCED_LOGIN";
+};
+
+export type CreateManagedUserInput = {
+  name: string;
+  email: string;
+  role: DevRole;
+  temporaryPassword?: string;
+};
+
+export type NotificationSummary = {
+  id: string;
+  type: string;
+  priority: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  title: string;
+  message: string;
+  relatedId: string | null;
+  read: boolean;
+  createdAt: string;
 };
 
 export type RawLeadListItem = {
@@ -214,11 +258,175 @@ export type ImportCommitResult = {
   };
 };
 
+export type VendorTeamType = "INDIVIDUAL" | "TEAM";
+
+export type VendorTeamMemberInput = {
+  name: string;
+  phone?: string;
+  aadhaarDocumentName: string;
+};
+
+export type CreateVendorInput = {
+  vendorName: string;
+  phone: string;
+  workingAddress: string;
+  address: string;
+  pincode: string;
+  dateOfBirth: string;
+  experienceYears: number;
+  aadhaarDocumentName: string;
+  selfieDocumentName: string;
+  signatureReference: string;
+  teamType: VendorTeamType;
+  teamSize?: number;
+  skills?: string[];
+  teamMembers?: VendorTeamMemberInput[];
+};
+
+export type VendorSummary = {
+  id: string;
+  dataScope: "development" | "production";
+  vendorCode: string;
+  vendorName: string;
+  phone: string;
+  workingAddress: string;
+  address: string;
+  pincode: string;
+  dateOfBirth: string;
+  experienceYears: number;
+  aadhaarDocumentName: string;
+  selfieDocumentName: string;
+  signatureReference: string;
+  teamType: VendorTeamType;
+  teamSize: number;
+  skills: string[];
+  kycStatus: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+  teamMembers: Array<{
+    id: string;
+    name: string;
+    phone: string | null;
+    aadhaarDocumentName: string;
+  }>;
+};
+
+export type VendorOfferSummary = {
+  id: string;
+  jobId: string;
+  vendorId: string;
+  vendorName: string;
+  vendorPhone: string;
+  offerPricePaise: number;
+  status: string;
+  messageBody: string;
+  sentAt: string;
+  respondedAt: string | null;
+};
+
+export type JobEventSummary = {
+  id: string;
+  type: string;
+  oldStatus: string | null;
+  newStatus: string | null;
+  summary: string;
+  createdAt: string;
+};
+
+export type JobPhotoType = "BEFORE_WORK" | "ISSUE_PHOTO" | "COMPLETED_WORK" | "CUSTOMER_CONFIRMATION" | "OTHER";
+export type JobChecklistType = "INSTALLATION" | "REPAIR_SERVICE";
+export type JobChecklistStatus = "DRAFT" | "SUBMITTED" | "APPROVED" | "REJECTED";
+export type WorkCertificateAudience = "CUSTOMER" | "VENDOR";
+
+export type JobPhotoSummary = {
+  id: string;
+  jobId: string;
+  vendorId: string | null;
+  type: JobPhotoType;
+  fileName: string;
+  storageKey: string;
+  notes: string | null;
+  uploadedById: string | null;
+  uploadedAt: string;
+};
+
+export type ChecklistItem = {
+  id: string;
+  label: string;
+  checked: boolean;
+};
+
+export type JobChecklistSummary = {
+  id: string;
+  jobId: string;
+  vendorId: string | null;
+  type: JobChecklistType;
+  status: JobChecklistStatus;
+  items: ChecklistItem[];
+  submittedAt: string | null;
+  approvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkCertificateSummary = {
+  id: string;
+  jobId: string;
+  customerId: string;
+  vendorId: string | null;
+  audience: WorkCertificateAudience;
+  title: string;
+  pdfFileName: string;
+  storageKey: string;
+  bodyText: string;
+  issuedAt: string;
+};
+
+export type JobOperation = {
+  id: string;
+  dataScope: "development" | "production";
+  leadId: string;
+  customerId: string;
+  customerName: string;
+  phoneNormalized: string;
+  jobType: string;
+  status: string;
+  siteContactNumber: string;
+  address: string;
+  scopeOfWork: string;
+  scheduledAt: string | null;
+  vendorOfferPricePaise: number | null;
+  assignedVendorId: string | null;
+  assignedVendorName: string | null;
+  startedAt: string | null;
+  pausedAt: string | null;
+  completedAt: string | null;
+  completionSummary: string | null;
+  vendorBonusPaise: number;
+  vendorDeductionPaise: number;
+  completionCertificateText: string | null;
+  createdAt: string;
+  updatedAt: string;
+  offers: VendorOfferSummary[];
+  events: JobEventSummary[];
+  photos: JobPhotoSummary[];
+  checklists: JobChecklistSummary[];
+  certificates: WorkCertificateSummary[];
+};
+
+export type WonLeadOperationDetail = {
+  lead: LeadDetail;
+  wonDetails: WonDetailsSnapshot;
+  job: JobOperation | null;
+  vendors: VendorSummary[];
+};
+
 const apiBaseUrl = (process.env.NEXT_PUBLIC_CI4U_API_BASE_URL ?? "http://127.0.0.1:4000/v1").replace(/\/$/, "");
 
 export async function apiGet<T>(path: string, session: DevSession): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
-    headers: getDevHeaders(session),
+    headers: getAuthHeaders(session),
     cache: "no-store",
   });
 
@@ -230,7 +438,7 @@ export async function apiPost<T>(path: string, session: DevSession, body: unknow
     method: "POST",
     headers: {
       "content-type": "application/json",
-      ...getDevHeaders(session),
+      ...getAuthHeaders(session),
     },
     body: JSON.stringify(body),
   });
@@ -238,7 +446,13 @@ export async function apiPost<T>(path: string, session: DevSession, body: unknow
   return parseResponse<T>(response);
 }
 
-function getDevHeaders(session: DevSession): Record<string, string> {
+function getAuthHeaders(session: DevSession): Record<string, string> {
+  if (session.accessToken) {
+    return {
+      authorization: `Bearer ${session.accessToken}`,
+    };
+  }
+
   return {
     "x-ci4u-data-scope": session.dataScope,
     "x-ci4u-dev-user-id": session.userId,

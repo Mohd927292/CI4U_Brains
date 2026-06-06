@@ -35,6 +35,7 @@ describe("Ci4uAuthMiddleware", () => {
       role: "SALES_MANAGER",
       dataScope: "development",
       authProvider: "dev",
+      authSubject: "dev_user_1",
     });
     expect(res.headers.get("x-ci4u-data-scope")).toBe("development");
   });
@@ -113,8 +114,56 @@ describe("Ci4uAuthMiddleware", () => {
       role: "ADMIN",
       dataScope: "production",
       authProvider: "jwt",
+      authSubject: "auth_user_1",
+      email: "admin@ci4u.test",
     });
     expect(res.headers.get("x-ci4u-data-scope")).toBe("production");
+  });
+
+  it("bootstraps the configured founder email as founder when app metadata is not set yet", async () => {
+    const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const publicJwk = {
+      ...keys.publicKey.export({ format: "jwk" }),
+      alg: "RS256",
+      kid: "ci4u-founder-key",
+      use: "sig",
+    };
+    const jwksServer = await startJwksServer(publicJwk);
+    const jwksUrl = getServerUrl(jwksServer, "/.well-known/jwks.json");
+    const token = jwt.sign(
+      {
+        email: "syedci4u@gmail.com",
+      },
+      keys.privateKey,
+      {
+        algorithm: "RS256",
+        expiresIn: "5m",
+        issuer: "https://auth.ci4u.test",
+        keyid: "ci4u-founder-key",
+        subject: "founder_user_1",
+      },
+    );
+
+    process.env.CI4U_AUTH_MODE = "jwt";
+    process.env.CI4U_DATA_SCOPE = "production";
+    process.env.CI4U_AUTH_JWKS_URL = jwksUrl;
+    process.env.CI4U_AUTH_ISSUER = "https://auth.ci4u.test";
+    process.env.CI4U_FOUNDER_EMAIL = "syedci4u@gmail.com";
+
+    const middleware = new Ci4uAuthMiddleware();
+    const req = makeRequest({ authorization: `Bearer ${token}` });
+    const res = makeResponse();
+    const next = vi.fn();
+
+    try {
+      await middleware.use(req, res, next);
+    } finally {
+      await closeServer(jwksServer);
+    }
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(req.user?.role).toBe("FOUNDER");
+    expect(req.user?.email).toBe("syedci4u@gmail.com");
   });
 });
 

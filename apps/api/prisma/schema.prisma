@@ -148,6 +148,77 @@ enum NotificationPriority {
   CRITICAL
 }
 
+enum VendorKycStatus {
+  KYC_NOT_STARTED
+  KYC_SUBMITTED
+  VERIFICATION_PENDING
+  VERIFIED
+  REJECTED
+  SUSPENDED
+  BLOCKED
+}
+
+enum VendorTeamType {
+  INDIVIDUAL
+  TEAM
+}
+
+enum JobStatus {
+  WAITING_VENDOR_ASSIGNMENT
+  VENDOR_OFFER_SENT
+  VENDOR_ASSIGNED
+  WORK_STARTED
+  WORK_PAUSED
+  WORK_COMPLETED
+  CLOSED
+}
+
+enum VendorOfferStatus {
+  OFFER_SENT
+  ACCEPTED
+  NEGOTIATED
+  REJECTED
+  CANCELLED
+}
+
+enum JobEventType {
+  JOB_CREATED
+  VENDOR_OFFER_SENT
+  WORK_STARTED
+  WORK_PAUSED
+  WORK_RESUMED
+  JOB_PHOTO_ADDED
+  JOB_CHECKLIST_SAVED
+  WORK_COMPLETED
+  CERTIFICATE_CREATED
+  JOB_CLOSED
+}
+
+enum JobPhotoType {
+  BEFORE_WORK
+  ISSUE_PHOTO
+  COMPLETED_WORK
+  CUSTOMER_CONFIRMATION
+  OTHER
+}
+
+enum JobChecklistType {
+  INSTALLATION
+  REPAIR_SERVICE
+}
+
+enum JobChecklistStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum WorkCertificateAudience {
+  CUSTOMER
+  VENDOR
+}
+
 model User {
   id            String       @id @default(cuid())
   authProvider String?      @map("auth_provider")
@@ -250,8 +321,10 @@ model Customer {
   whatsappMessages WhatsAppMessage[]
   quotations       LeadQuotation[]
   wonLeadDetails   WonLeadDetails[]
+  jobs             Job[]
   notifications    Notification[]
   archives         ArchiveRecord[]
+  certificates     WorkCertificate[]
 
   @@index([dataScope, businessName])
   @@index([area, pincode])
@@ -309,6 +382,7 @@ model Lead {
   whatsapp       WhatsAppMessage[]
   quotations     LeadQuotation[]
   wonDetails     WonLeadDetails?
+  job            Job?
   archives       ArchiveRecord[]
   importRows     ImportRow[]
 
@@ -513,6 +587,208 @@ model WonLeadDetails {
   @@index([dataScope, customerId])
   @@index([customerId])
   @@map("won_lead_details")
+}
+
+model Vendor {
+  id                    String          @id @default(cuid())
+  dataScope             DataScope       @default(DEVELOPMENT) @map("data_scope")
+  vendorCode            String          @map("vendor_code")
+  vendorName            String          @map("vendor_name")
+  phone                 String
+  workingAddress        String          @map("working_address")
+  address               String
+  pincode               String
+  dateOfBirth           DateTime        @map("date_of_birth")
+  experienceYears       Int             @default(0) @map("experience_years")
+  aadhaarDocumentName   String          @map("aadhaar_document_name")
+  selfieDocumentName    String          @map("selfie_document_name")
+  signatureReference    String          @map("signature_reference")
+  teamType              VendorTeamType  @default(INDIVIDUAL) @map("team_type")
+  teamSize              Int             @default(1) @map("team_size")
+  skills                Json            @default("[]")
+  kycStatus             VendorKycStatus @default(VERIFICATION_PENDING) @map("kyc_status")
+  active                Boolean         @default(true)
+  createdAt             DateTime        @default(now()) @map("created_at")
+  updatedAt             DateTime        @updatedAt @map("updated_at")
+
+  teamMembers VendorTeamMember[]
+  offers      VendorOffer[]
+  jobs        Job[]              @relation("JobAssignedVendor")
+  photos      JobPhoto[]
+  checklists  JobChecklist[]
+  certificates WorkCertificate[]
+
+  @@unique([dataScope, phone])
+  @@unique([dataScope, vendorCode])
+  @@index([dataScope, active, kycStatus])
+  @@index([dataScope, pincode, active])
+  @@map("vendors")
+}
+
+model VendorTeamMember {
+  id                  String   @id @default(cuid())
+  dataScope           DataScope @default(DEVELOPMENT) @map("data_scope")
+  vendorId            String   @map("vendor_id")
+  name                String
+  phone               String?
+  aadhaarDocumentName String   @map("aadhaar_document_name")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  vendor Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@index([dataScope, vendorId])
+  @@map("vendor_team_members")
+}
+
+model Job {
+  id                       String    @id @default(cuid())
+  dataScope                DataScope @default(DEVELOPMENT) @map("data_scope")
+  leadId                   String    @unique @map("lead_id")
+  customerId               String    @map("customer_id")
+  jobType                  String    @map("job_type")
+  status                   JobStatus @default(WAITING_VENDOR_ASSIGNMENT)
+  siteContactNumber        String    @map("site_contact_number")
+  address                  String
+  scopeOfWork              String    @map("scope_of_work")
+  scheduledAt              DateTime? @map("scheduled_at")
+  vendorOfferPricePaise    Int?      @map("vendor_offer_price_paise")
+  assignedVendorId         String?   @map("assigned_vendor_id")
+  startedAt                DateTime? @map("started_at")
+  pausedAt                 DateTime? @map("paused_at")
+  completedAt              DateTime? @map("completed_at")
+  completionSummary        String?   @map("completion_summary")
+  vendorBonusPaise         Int       @default(0) @map("vendor_bonus_paise")
+  vendorDeductionPaise     Int       @default(0) @map("vendor_deduction_paise")
+  completionCertificateText String?  @map("completion_certificate_text")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
+
+  lead           Lead          @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  customer       Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  assignedVendor Vendor?       @relation("JobAssignedVendor", fields: [assignedVendorId], references: [id], onDelete: SetNull)
+  offers         VendorOffer[]
+  events         JobEvent[]
+  photos         JobPhoto[]
+  checklists     JobChecklist[]
+  certificates   WorkCertificate[]
+
+  @@index([dataScope, status, scheduledAt])
+  @@index([dataScope, assignedVendorId, status])
+  @@index([customerId])
+  @@map("jobs")
+}
+
+model VendorOffer {
+  id              String            @id @default(cuid())
+  dataScope       DataScope         @default(DEVELOPMENT) @map("data_scope")
+  jobId           String            @map("job_id")
+  vendorId        String            @map("vendor_id")
+  offerPricePaise Int               @map("offer_price_paise")
+  status          VendorOfferStatus @default(OFFER_SENT)
+  messageBody     String            @map("message_body")
+  sentAt          DateTime          @default(now()) @map("sent_at")
+  respondedAt     DateTime?         @map("responded_at")
+  createdAt       DateTime          @default(now()) @map("created_at")
+
+  job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  vendor Vendor @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+
+  @@unique([jobId, vendorId])
+  @@index([dataScope, vendorId, status])
+  @@index([jobId])
+  @@map("vendor_offers")
+}
+
+model JobEvent {
+  id          String       @id @default(cuid())
+  dataScope   DataScope    @default(DEVELOPMENT) @map("data_scope")
+  jobId       String       @map("job_id")
+  type        JobEventType
+  oldStatus   JobStatus?   @map("old_status")
+  newStatus   JobStatus?   @map("new_status")
+  summary     String
+  metadata    Json         @default("{}")
+  actorId     String?      @map("actor_id")
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([dataScope, jobId, createdAt])
+  @@index([jobId])
+  @@map("job_events")
+}
+
+model JobPhoto {
+  id           String       @id @default(cuid())
+  dataScope    DataScope    @default(DEVELOPMENT) @map("data_scope")
+  jobId        String       @map("job_id")
+  vendorId     String?      @map("vendor_id")
+  type         JobPhotoType
+  fileName     String       @map("file_name")
+  storageKey   String       @map("storage_key")
+  notes        String?
+  uploadedById String?      @map("uploaded_by_id")
+  uploadedAt   DateTime     @default(now()) @map("uploaded_at")
+
+  job    Job     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  vendor Vendor? @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+
+  @@index([dataScope, jobId, type, uploadedAt])
+  @@index([jobId])
+  @@index([vendorId])
+  @@map("job_photos")
+}
+
+model JobChecklist {
+  id           String             @id @default(cuid())
+  dataScope    DataScope          @default(DEVELOPMENT) @map("data_scope")
+  jobId        String             @map("job_id")
+  vendorId     String?            @map("vendor_id")
+  type         JobChecklistType
+  status       JobChecklistStatus @default(DRAFT)
+  items        Json               @default("[]")
+  submittedById String?           @map("submitted_by_id")
+  submittedAt  DateTime?          @map("submitted_at")
+  approvedById String?            @map("approved_by_id")
+  approvedAt   DateTime?          @map("approved_at")
+  createdAt    DateTime           @default(now()) @map("created_at")
+  updatedAt    DateTime           @updatedAt @map("updated_at")
+
+  job    Job     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  vendor Vendor? @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+
+  @@unique([jobId, type])
+  @@index([dataScope, jobId, status])
+  @@index([jobId])
+  @@index([vendorId])
+  @@map("job_checklists")
+}
+
+model WorkCertificate {
+  id          String                  @id @default(cuid())
+  dataScope   DataScope               @default(DEVELOPMENT) @map("data_scope")
+  jobId       String                  @map("job_id")
+  customerId  String                  @map("customer_id")
+  vendorId    String?                 @map("vendor_id")
+  audience    WorkCertificateAudience
+  title       String
+  pdfFileName String                  @map("pdf_file_name")
+  storageKey  String                  @map("storage_key")
+  bodyText    String                  @map("body_text")
+  issuedAt    DateTime                @default(now()) @map("issued_at")
+  issuedById  String?                 @map("issued_by_id")
+
+  job      Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  vendor   Vendor?  @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+
+  @@unique([jobId, audience])
+  @@index([dataScope, customerId, issuedAt])
+  @@index([dataScope, vendorId, issuedAt])
+  @@index([jobId])
+  @@index([customerId])
+  @@index([vendorId])
+  @@map("work_certificates")
 }
 
 model Notification {

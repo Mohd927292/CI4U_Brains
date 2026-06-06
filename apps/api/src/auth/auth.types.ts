@@ -21,7 +21,9 @@ export type RequestUser = {
   name: string;
   role: UserRole;
   dataScope: DataScope;
-  authProvider: "dev" | "jwt";
+  authProvider: "dev" | "jwt" | "supabase";
+  authSubject?: string;
+  email?: string;
 };
 
 declare module "express-serve-static-core" {

@@ -4,16 +4,22 @@ import {
   AlertTriangle,
   ArchiveRestore,
   Bell,
+  BriefcaseBusiness,
   CalendarClock,
   CheckCircle2,
   ChevronRight,
+  ClipboardCheck,
+  FileCheck2,
   FileSpreadsheet,
   Info as InfoIcon,
   LayoutDashboard,
   Loader2,
   LockKeyhole,
   Menu,
+  Pause,
   Plus,
+  Send,
+  UserPlus,
   RefreshCw,
   Search,
   Upload,
@@ -26,19 +32,32 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   apiGet,
   apiPost,
+  type ChecklistItem,
+  type CreateManagedUserInput,
+  type CreateVendorInput,
   type CreateLeadResponse,
   type DevRole,
   type DevSession,
   type ImportCommitResult,
   type ImportPreviewResult,
   type ImportRowInput,
+  type JobChecklistType,
+  type JobOperation,
+  type JobPhotoType,
   type LeadDetail,
   type LeadQueue,
   type LeadSaveAck,
+  type ManagedUser,
+  type NotificationSummary,
   type QueueCounts,
   type RawLeadListItem,
   type SaveCallOutcomeInput,
+  type SessionUser,
+  type VendorSummary,
+  type VendorTeamMemberInput,
+  type WonLeadOperationDetail,
 } from "../lib/ci4u-api";
+import { getSupabaseBrowserClient, isProductionAuthEnabled } from "../lib/supabase-browser";
 
 const sessionStorageKey = "ci4u.devSession.v1";
 const pendingLeadSavesStorageKey = "ci4u.pendingLeadSaves.v1";
@@ -48,9 +67,10 @@ const devUsers: Array<{ name: string; role: DevRole; label: string }> = [
   { name: "Rachana Decos", role: "SALES_MANAGER", label: "Sales manager testing" },
   { name: "Sandeep Decos", role: "SALES_EXECUTIVE", label: "Sales executive testing" },
   { name: "Operations Dev", role: "OPERATIONS_MANAGER", label: "Operations workflow testing" },
+  { name: "Vendor Desk", role: "VENDOR_MANAGER", label: "Vendor KYC and work assignment testing" },
 ];
 
-type ActiveView = "dashboard" | "raw-leads" | "lead-detail";
+type ActiveView = "dashboard" | "raw-leads" | "lead-detail" | "vendors" | "users";
 
 const emptyQueueCounts: QueueCounts = {
   RAW: 0,
@@ -111,6 +131,10 @@ function forgetBackgroundSave(leadId: string) {
   writePendingBackgroundSaves(readPendingBackgroundSaves().filter((item) => item.lead.id !== leadId));
 }
 
+function canManageUsers(session: DevSession): boolean {
+  return ["FOUNDER", "SUPER_ADMIN", "ADMIN", "MANAGEMENT"].includes(session.role);
+}
+
 export function Ci4uBrainsApp() {
   const [session, setSession] = useState<DevSession | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
@@ -126,6 +150,8 @@ export function Ci4uBrainsApp() {
   const [workMessage, setWorkMessage] = useState<string | null>(null);
   const [failedSave, setFailedSave] = useState<FailedBackgroundSave | null>(null);
   const [pendingSaveCount, setPendingSaveCount] = useState(0);
+  const [notifications, setNotifications] = useState<NotificationSummary[]>([]);
+  const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
   const leadDetailCache = useRef<Map<string, LeadDetail>>(new Map());
   const queueCache = useRef<Map<LeadQueue, RawLeadListItem[]>>(new Map());
   const queueRequestId = useRef(0);
@@ -139,6 +165,19 @@ export function Ci4uBrainsApp() {
       setQueueCounts(await apiGet<QueueCounts>("/leads/counts", activeSession));
     } catch {
       setQueueCounts(emptyQueueCounts);
+    }
+  }, [session]);
+
+  const loadNotifications = useCallback(async (activeSession = session) => {
+    if (!activeSession || activeSession.authMode !== "supabase") {
+      setNotifications([]);
+      return;
+    }
+
+    try {
+      setNotifications(await apiGet<NotificationSummary[]>("/auth/notifications", activeSession));
+    } catch {
+      setNotifications([]);
     }
   }, [session]);
 
@@ -200,15 +239,53 @@ export function Ci4uBrainsApp() {
     }
   }, [loadCounts, prefetchLeadDetails, session]);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      const saved = window.localStorage.getItem(sessionStorageKey);
+  const restoreSession = useCallback(async () => {
+    const saved = window.localStorage.getItem(sessionStorageKey);
+
+    if (!isProductionAuthEnabled()) {
       setSession(saved ? (JSON.parse(saved) as DevSession) : null);
       setSessionReady(true);
+      return;
+    }
+
+    const supabase = getSupabaseBrowserClient();
+
+    if (!supabase) {
+      window.localStorage.removeItem(sessionStorageKey);
+      setSession(null);
+      setSessionReady(true);
+      return;
+    }
+
+    const { data } = await supabase.auth.getSession();
+    const accessToken = data.session?.access_token;
+
+    if (!accessToken) {
+      window.localStorage.removeItem(sessionStorageKey);
+      setSession(null);
+      setSessionReady(true);
+      return;
+    }
+
+    const syncedSession = await syncProductionSession(accessToken);
+    setSession(syncedSession);
+    window.localStorage.setItem(sessionStorageKey, JSON.stringify(syncedSession));
+    setSessionReady(true);
+    void loadQueue("RAW", syncedSession, { preferCache: true });
+    void loadNotifications(syncedSession);
+  }, [loadNotifications, loadQueue]);
+
+  useEffect(() => {
+    if (sessionReady) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      void restoreSession();
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [restoreSession, sessionReady]);
 
   useEffect(() => {
     function warnIfSaveIsPending(event: BeforeUnloadEvent) {
@@ -240,6 +317,7 @@ export function Ci4uBrainsApp() {
 
     const timer = window.setTimeout(() => {
       void loadQueue("RAW", session, { preferCache: true });
+      void loadNotifications(session);
     }, 0);
 
     return () => {
@@ -250,7 +328,7 @@ export function Ci4uBrainsApp() {
       window.clearTimeout(pendingCountTimer);
       window.clearTimeout(timer);
     };
-  }, [loadQueue, session]);
+  }, [loadNotifications, loadQueue, session]);
 
   function prefetchAdjacentLeads(currentLeadId: string, queueSnapshot = rawLeads, activeSession = session) {
     if (!activeSession) {
@@ -308,18 +386,70 @@ export function Ci4uBrainsApp() {
       name: user.name,
       role: user.role,
       dataScope: "development",
+      authMode: "dev",
     };
     window.localStorage.setItem(sessionStorageKey, JSON.stringify(nextSession));
     setSession(nextSession);
     void loadQueue("RAW", nextSession, { preferCache: true });
   }
 
-  function logout() {
+  async function loginWithSupabase(email: string, password: string) {
+    const supabase = getSupabaseBrowserClient();
+
+    if (!supabase) {
+      throw new Error("Production login is not configured. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY.");
+    }
+
+    const { data, error: loginError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (loginError || !data.session?.access_token) {
+      throw new Error(loginError?.message ?? "Could not sign in.");
+    }
+
+    const nextSession = await syncProductionSession(data.session.access_token);
+    window.localStorage.setItem(sessionStorageKey, JSON.stringify(nextSession));
+    setSession(nextSession);
+    void loadQueue("RAW", nextSession, { preferCache: true });
+    void loadNotifications(nextSession);
+  }
+
+  async function syncProductionSession(accessToken: string): Promise<DevSession> {
+    const temporarySession: DevSession = {
+      userId: "auth-sync",
+      name: "Authenticated User",
+      role: "VIEWER",
+      dataScope: "production",
+      accessToken,
+      authMode: "supabase",
+    };
+    const user = await apiGet<SessionUser>("/auth/me", temporarySession);
+
+    return {
+      userId: user.id,
+      name: user.name,
+      role: user.role,
+      dataScope: user.dataScope,
+      email: user.email,
+      accessToken,
+      authMode: "supabase",
+    };
+  }
+
+  async function logout() {
+    if (session?.authMode === "supabase") {
+      await getSupabaseBrowserClient()?.auth.signOut();
+    }
+
     window.localStorage.removeItem(sessionStorageKey);
     setSession(null);
     setSessionReady(true);
     setRawLeads([]);
     setQueueCounts(emptyQueueCounts);
+    setNotifications([]);
+    setNotificationPanelOpen(false);
     setSelectedLead(null);
     setQueueLoading(null);
     setFailedSave(null);
@@ -332,6 +462,20 @@ export function Ci4uBrainsApp() {
   function openQueue(queue: LeadQueue) {
     setActiveView("raw-leads");
     void loadQueue(queue, session, { preferCache: true });
+  }
+
+  async function markNotificationRead(notificationId: string) {
+    if (!session) {
+      return;
+    }
+
+    setNotifications((current) => current.map((item) => (item.id === notificationId ? { ...item, read: true } : item)));
+
+    try {
+      await apiPost<NotificationSummary>(`/auth/notifications/${notificationId}/read`, session, {});
+    } catch {
+      void loadNotifications(session);
+    }
   }
 
   function handleLeadUpdateRequested(lead: LeadDetail, payload: SaveCallOutcomeInput) {
@@ -467,7 +611,7 @@ export function Ci4uBrainsApp() {
   }
 
   if (!session) {
-    return <DevLogin onLogin={login} />;
+    return <AccessLogin onDevLogin={login} onProductionLogin={loginWithSupabase} />;
   }
 
   return (
@@ -487,11 +631,23 @@ export function Ci4uBrainsApp() {
             <NavButton active={activeView === "raw-leads" && activeQueue === "WON"} icon={CheckCircle2} label="Won Leads" count={queueCounts.WON} onClick={() => openQueue("WON")} />
             <NavButton active={activeView === "raw-leads" && activeQueue === "LOST"} icon={AlertTriangle} label="Lost Leads" count={queueCounts.LOST} onClick={() => openQueue("LOST")} />
             <NavButton active={activeView === "raw-leads" && activeQueue === "ARCHIVE"} icon={ArchiveRestore} label="Trash / Archive" count={queueCounts.ARCHIVE} onClick={() => openQueue("ARCHIVE")} />
+            <NavButton active={activeView === "vendors"} icon={BriefcaseBusiness} label="Vendors" onClick={() => setActiveView("vendors")} />
+            {canManageUsers(session) ? <NavButton active={activeView === "users"} icon={UserPlus} label="User Management" onClick={() => setActiveView("users")} /> : null}
           </nav>
         </aside>
 
         <section className="min-w-0 flex-1 bg-[radial-gradient(circle_at_top_left,rgba(20,184,166,0.12),transparent_36%),#031023]">
-          <TopBar session={session} rawCount={queueCounts.RAW} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((value) => !value)} onLogout={logout} />
+          <TopBar
+            session={session}
+            rawCount={queueCounts.RAW}
+            notifications={notifications}
+            notificationPanelOpen={notificationPanelOpen}
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={() => setSidebarOpen((value) => !value)}
+            onToggleNotifications={() => setNotificationPanelOpen((value) => !value)}
+            onMarkNotificationRead={(notificationId) => void markNotificationRead(notificationId)}
+            onLogout={() => void logout()}
+          />
           <div className="mx-auto flex w-full max-w-[1540px] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
             {error ? <Notice tone="danger" title="Action blocked" message={error} /> : null}
             {failedSave ? <SaveFailureBanner failure={failedSave} onRetry={retryFailedSave} onReopen={reopenFailedSaveLead} /> : null}
@@ -512,8 +668,10 @@ export function Ci4uBrainsApp() {
                 onOpenLead={openLead}
               />
             ) : null}
+            {activeView === "vendors" ? <VendorsWorkspace session={session} /> : null}
+            {activeView === "users" ? <UserManagementWorkspace session={session} onUsersChanged={() => void loadNotifications(session)} /> : null}
             {activeView === "lead-detail" && selectedLead ? (
-              <LeadDetailWorkspaceV2 key={selectedLead.id} lead={selectedLead} onSaveRequested={handleLeadUpdateRequested} onBack={() => setActiveView("raw-leads")} />
+              <LeadDetailWorkspaceV2 key={selectedLead.id} session={session} lead={selectedLead} onSaveRequested={handleLeadUpdateRequested} onBack={() => setActiveView("raw-leads")} />
             ) : null}
           </div>
         </section>
@@ -533,7 +691,67 @@ function DevLoading() {
   );
 }
 
-function DevLogin({ onLogin }: { onLogin: (user: (typeof devUsers)[number]) => void }) {
+function AccessLogin({
+  onDevLogin,
+  onProductionLogin,
+}: {
+  onDevLogin: (user: (typeof devUsers)[number]) => void;
+  onProductionLogin: (email: string, password: string) => Promise<void>;
+}) {
+  const productionMode = isProductionAuthEnabled();
+  const [email, setEmail] = useState("syedci4u@gmail.com");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submitProductionLogin() {
+    setBusy(true);
+    setError(null);
+
+    try {
+      await onProductionLogin(email, password);
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : "Login failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (productionMode) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#031023] px-4 text-white">
+        <section className="w-full max-w-xl rounded-md border border-white/10 bg-white/[0.04] p-6 shadow-[0_24px_70px_rgba(0,0,0,0.28)]">
+          <div className="mb-6 flex items-start gap-4">
+            <div className="grid h-12 w-12 place-items-center rounded-md border border-cyan-300/40 bg-cyan-300/10">
+              <LockKeyhole className="h-6 w-6 text-cyan-200" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-semibold">CI4U Brains Login</h1>
+              <p className="mt-1 text-sm text-slate-300">Production access uses Supabase Auth and CI4U role permissions.</p>
+            </div>
+          </div>
+          {error ? <Notice tone="danger" title="Login blocked" message={error} /> : null}
+          <div className="grid gap-4">
+            <Field label="Email">
+              <input className="field" type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+            </Field>
+            <Field label="Password">
+              <input className="field" type="password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  void submitProductionLogin();
+                }
+              }} />
+            </Field>
+            <button className="primary-button w-full" type="button" disabled={busy || !email.trim() || !password} onClick={() => void submitProductionLogin()}>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LockKeyhole className="h-4 w-4" />}
+              Login
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="grid min-h-screen place-items-center bg-[#031023] px-4 text-white">
       <section className="w-full max-w-4xl rounded-md border border-white/10 bg-white/[0.04] p-6 shadow-[0_24px_70px_rgba(0,0,0,0.28)]">
@@ -553,7 +771,7 @@ function DevLogin({ onLogin }: { onLogin: (user: (typeof devUsers)[number]) => v
             <button
               key={user.role}
               className="rounded-md border border-white/10 bg-white/[0.04] p-4 text-left transition hover:border-cyan-300/40 hover:bg-cyan-300/10"
-              onClick={() => onLogin(user)}
+              onClick={() => onDevLogin(user)}
             >
               <div className="font-semibold">{user.name}</div>
               <div className="mt-1 text-sm text-cyan-200">{user.role.replaceAll("_", " ")}</div>
@@ -593,10 +811,10 @@ function DevScopeCard({ session, onLogout }: { session: DevSession; onLogout: ()
         </div>
       </div>
       <div className="mt-4 rounded-md border border-cyan-300/20 bg-black/20 px-3 py-2 text-xs text-cyan-100">
-        DEV DATA ONLY
+        {session.authMode === "supabase" ? "PRODUCTION ACCESS" : "DEV DATA ONLY"}
       </div>
       <button className="mt-3 text-sm font-semibold text-slate-200 hover:text-white" onClick={onLogout}>
-        Switch dev user
+        {session.authMode === "supabase" ? "Logout" : "Switch dev user"}
       </button>
     </section>
   );
@@ -635,16 +853,26 @@ function NavButton({
 function TopBar({
   session,
   rawCount,
+  notifications,
+  notificationPanelOpen,
   sidebarOpen,
   onToggleSidebar,
+  onToggleNotifications,
+  onMarkNotificationRead,
   onLogout,
 }: {
   session: DevSession;
   rawCount: number;
+  notifications: NotificationSummary[];
+  notificationPanelOpen: boolean;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
+  onToggleNotifications: () => void;
+  onMarkNotificationRead: (notificationId: string) => void;
   onLogout: () => void;
 }) {
+  const unreadCount = notifications.filter((notification) => !notification.read).length;
+
   return (
     <header className="sticky top-0 z-20 border-b border-white/10 bg-[#031023]/92 backdrop-blur">
       <div className="mx-auto flex h-20 w-full max-w-[1540px] items-center gap-4 px-4 sm:px-6 lg:px-8">
@@ -655,11 +883,11 @@ function TopBar({
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-semibold">Operations Command</h1>
             <span className="rounded-md border border-cyan-300/20 bg-cyan-400/10 px-2 py-1 text-xs font-semibold uppercase text-cyan-200">
-              Development workspace
+              {session.authMode === "supabase" ? "Production workspace" : "Development workspace"}
             </span>
           </div>
           <p className="text-sm text-slate-300">
-            {session.name} is testing with isolated dev data. Raw leads: {rawCount}
+            {session.authMode === "supabase" ? `${session.name} is working on production data.` : `${session.name} is testing with isolated dev data.`} Raw leads: {rawCount}
           </p>
         </div>
         <div className="ml-auto hidden min-w-[240px] max-w-md flex-1 items-center gap-3 rounded-md border border-white/10 bg-white/5 px-4 py-3 md:flex">
@@ -670,12 +898,42 @@ function TopBar({
             type="search"
           />
         </div>
-        <button className="relative grid h-11 w-11 place-items-center rounded-md border border-white/10 bg-white/5">
-          <Bell className="h-5 w-5" />
-          <span className="absolute -right-1 -top-1 grid h-6 w-6 place-items-center rounded-full bg-red-500 text-xs font-bold">
-            0
-          </span>
-        </button>
+        <div className="relative">
+          <button className="relative grid h-11 w-11 place-items-center rounded-md border border-white/10 bg-white/5" type="button" onClick={onToggleNotifications}>
+            <Bell className="h-5 w-5" />
+            <span className="absolute -right-1 -top-1 grid h-6 w-6 place-items-center rounded-full bg-red-500 text-xs font-bold">
+              {unreadCount}
+            </span>
+          </button>
+          {notificationPanelOpen ? (
+            <div className="absolute right-0 top-14 z-30 w-[360px] rounded-md border border-white/10 bg-[#071a33] p-3 shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="font-semibold">Notifications</div>
+                <span className="text-xs text-cyan-200">{unreadCount} unread</span>
+              </div>
+              <div className="smooth-scroll max-h-96 space-y-2 overflow-auto">
+                {notifications.map((notification) => (
+                  <button
+                    key={notification.id}
+                    className={`w-full rounded-md border px-3 py-2 text-left text-sm ${
+                      notification.read ? "border-white/10 bg-white/[0.03] text-slate-300" : "border-cyan-300/25 bg-cyan-300/10 text-white"
+                    }`}
+                    type="button"
+                    onClick={() => onMarkNotificationRead(notification.id)}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold">{notification.title}</span>
+                      <span className="text-[11px] uppercase text-cyan-200">{notification.priority}</span>
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-slate-300">{notification.message}</p>
+                    <div className="mt-1 text-[11px] text-slate-500">{formatDateTime(notification.createdAt)}</div>
+                  </button>
+                ))}
+                {!notifications.length ? <div className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-6 text-center text-sm text-slate-400">No notifications yet.</div> : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
         <button className="rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold" onClick={onLogout}>
           Logout
         </button>
@@ -1065,6 +1323,545 @@ function ImportPreview({ preview }: { preview: ImportPreviewResult }) {
   );
 }
 
+const staffRoleOptions: Array<{ value: DevRole; label: string }> = [
+  { value: "FOUNDER", label: "Founder" },
+  { value: "SUPER_ADMIN", label: "Super Admin" },
+  { value: "ADMIN", label: "Admin" },
+  { value: "MANAGEMENT", label: "Management" },
+  { value: "SALES_HEAD", label: "Sales Head" },
+  { value: "SALES_MANAGER", label: "Sales Manager" },
+  { value: "SALES_EXECUTIVE", label: "Sales Executive" },
+  { value: "OPERATIONS_HEAD", label: "Operations Head" },
+  { value: "OPERATIONS_MANAGER", label: "Operations Manager" },
+  { value: "OPERATIONS_EXECUTIVE", label: "Operations Executive" },
+  { value: "VENDOR_MANAGER", label: "Vendor Manager" },
+  { value: "ACCOUNTS_EXECUTIVE", label: "Accounts Executive" },
+  { value: "SUPPORT_STAFF", label: "Support Staff" },
+  { value: "VIEWER", label: "Viewer" },
+];
+
+function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSession; onUsersChanged: () => void }) {
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<DevRole>("SALES_EXECUTIVE");
+  const [temporaryPassword, setTemporaryPassword] = useState("");
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [savingUser, setSavingUser] = useState(false);
+  const [message, setMessage] = useState<{ tone: "success" | "warning" | "danger"; title: string; message: string } | null>(null);
+
+  const loadUsers = useCallback(async () => {
+    setLoadingUsers(true);
+    setMessage(null);
+
+    try {
+      setUsers(await apiGet<ManagedUser[]>("/auth/users", session));
+    } catch (error) {
+      setMessage({ tone: "danger", title: "Users blocked", message: error instanceof Error ? error.message : "Could not load users." });
+    } finally {
+      setLoadingUsers(false);
+    }
+  }, [session]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadUsers();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [loadUsers]);
+
+  async function addUser() {
+    setSavingUser(true);
+    setMessage(null);
+
+    const payload: CreateManagedUserInput = {
+      name,
+      email,
+      role,
+      ...(temporaryPassword ? { temporaryPassword } : {}),
+    };
+
+    try {
+      const saved = await apiPost<ManagedUser>("/auth/users", session, payload);
+      setUsers((current) => [saved, ...current.filter((user) => user.id !== saved.id)]);
+      setName("");
+      setEmail("");
+      setTemporaryPassword("");
+      onUsersChanged();
+      setMessage({
+        tone: saved.authProvisioning === "LOCAL_ONLY" ? "warning" : "success",
+        title: "User access saved",
+        message:
+          saved.authProvisioning === "LOCAL_ONLY"
+            ? "User was saved in CI4U, but Supabase Auth provisioning needs CI4U_SUPABASE_SERVICE_ROLE_KEY on the backend."
+            : `${saved.email} can use CI4U as ${formatEnum(saved.role)}.`,
+      });
+    } catch (error) {
+      setMessage({ tone: "danger", title: "User not saved", message: error instanceof Error ? error.message : "Could not save user." });
+    } finally {
+      setSavingUser(false);
+    }
+  }
+
+  return (
+    <Panel
+      title="User Management"
+      action={
+        <button className="secondary-button" type="button" disabled={loadingUsers} onClick={() => void loadUsers()}>
+          <RefreshCw className={`h-4 w-4 ${loadingUsers ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
+      }
+    >
+      <Notice
+        tone="warning"
+        title="Production access control"
+        message="Only create real staff accounts here. Roles control what the API will allow; do not share founder access."
+      />
+      {message ? <Notice tone={message.tone} title={message.title} message={message.message} /> : null}
+
+      <section className="mt-4 rounded-md border border-white/10 bg-white/[0.03] p-4">
+        <div className="mb-4 flex items-start gap-3">
+          <UserPlus className="mt-0.5 h-5 w-5 text-cyan-200" />
+          <div>
+            <h3 className="font-semibold">Add Staff ID</h3>
+            <p className="mt-1 text-sm text-slate-300">Temporary password is optional. Without it, the backend will invite the user if Supabase service role is configured.</p>
+          </div>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <Field label="Staff Name">
+            <input className="field" value={name} onChange={(event) => setName(event.target.value)} />
+          </Field>
+          <Field label="Email ID">
+            <input className="field" type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+          </Field>
+          <Field label="Post / Role">
+            <select className="field" value={role} onChange={(event) => setRole(event.target.value as DevRole)}>
+              {staffRoleOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Temporary Password">
+            <input className="field" type="password" value={temporaryPassword} onChange={(event) => setTemporaryPassword(event.target.value)} placeholder="Min 8 chars, optional" />
+          </Field>
+        </div>
+        <button className="primary-button mt-4" type="button" disabled={savingUser || !name.trim() || !email.trim()} onClick={() => void addUser()}>
+          {savingUser ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
+          Add User
+        </button>
+      </section>
+
+      <section className="mt-5 rounded-md border border-white/10 bg-white/[0.03] p-4">
+        <h3 className="font-semibold">Staff Accounts</h3>
+        <div className="smooth-scroll mt-4 overflow-auto rounded-md border border-white/10">
+          <table className="min-w-full divide-y divide-white/10 text-sm">
+            <thead className="bg-white/[0.03] text-left text-xs uppercase text-slate-400">
+              <tr>
+                <th className="px-4 py-3">Name</th>
+                <th className="px-4 py-3">Email</th>
+                <th className="px-4 py-3">Role</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Provisioning</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/10">
+              {users.map((user) => (
+                <tr key={user.id} className="hover:bg-white/[0.03]">
+                  <td className="px-4 py-3 font-semibold">{user.name}</td>
+                  <td className="px-4 py-3 text-slate-300">{user.email ?? "-"}</td>
+                  <td className="px-4 py-3 text-cyan-200">{formatEnum(user.role)}</td>
+                  <td className="px-4 py-3">{formatEnum(user.status)}</td>
+                  <td className="px-4 py-3 text-slate-300">{formatEnum(user.authProvisioning)}</td>
+                </tr>
+              ))}
+              {!users.length ? (
+                <tr>
+                  <td className="px-4 py-8 text-center text-slate-400" colSpan={5}>
+                    No staff users found yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </Panel>
+  );
+}
+
+function VendorsWorkspace({ session }: { session: DevSession }) {
+  const [vendors, setVendors] = useState<VendorSummary[]>([]);
+  const [form, setForm] = useState<CreateVendorInput>(() => emptyVendorForm());
+  const [skillText, setSkillText] = useState("");
+  const [loadingVendors, setLoadingVendors] = useState(false);
+  const [savingVendor, setSavingVendor] = useState(false);
+  const [message, setMessage] = useState<{ tone: "success" | "warning" | "danger"; title: string; message: string } | null>(null);
+
+  const loadVendors = useCallback(async () => {
+    setLoadingVendors(true);
+
+    try {
+      setVendors(await apiGet<VendorSummary[]>("/operations/vendors", session));
+    } catch (error) {
+      setMessage({ tone: "danger", title: "Vendor list blocked", message: error instanceof Error ? error.message : "Could not load vendors." });
+    } finally {
+      setLoadingVendors(false);
+    }
+  }, [session]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadVendors();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [loadVendors]);
+
+  function updateForm(patch: Partial<CreateVendorInput>) {
+    setForm((current) => ({ ...current, ...patch }));
+  }
+
+  function changeTeamType(teamType: "INDIVIDUAL" | "TEAM") {
+    setForm((current) =>
+      teamType === "TEAM"
+        ? {
+            ...current,
+            teamType,
+            teamSize: Math.max(2, current.teamSize ?? 2),
+            teamMembers: resizeTeamMembers(current.teamMembers ?? [], Math.max(2, current.teamSize ?? 2)),
+          }
+        : { ...current, teamType, teamSize: 1, teamMembers: [] },
+    );
+  }
+
+  function changeTeamSize(value: string) {
+    const teamSize = Math.max(2, Number(value || 2));
+    setForm((current) => ({
+      ...current,
+      teamSize,
+      teamMembers: resizeTeamMembers(current.teamMembers ?? [], teamSize),
+    }));
+  }
+
+  function updateTeamMember(index: number, patch: Partial<VendorTeamMemberInput>) {
+    setForm((current) => {
+      const members = resizeTeamMembers(current.teamMembers ?? [], current.teamSize ?? 2).map((member, memberIndex) =>
+        memberIndex === index ? { ...member, ...patch } : member,
+      );
+      return { ...current, teamMembers: members };
+    });
+  }
+
+  async function submitVendor() {
+    setSavingVendor(true);
+    setMessage(null);
+
+    try {
+      const created = await apiPost<VendorSummary>("/operations/vendors", session, {
+        ...form,
+        skills: skillText
+          .split(",")
+          .map((skill) => skill.trim())
+          .filter(Boolean),
+        teamSize: form.teamType === "TEAM" ? form.teamSize : 1,
+        teamMembers: form.teamType === "TEAM" ? form.teamMembers : [],
+      });
+      setVendors((current) => [created, ...current.filter((vendor) => vendor.id !== created.id)]);
+      setForm(emptyVendorForm());
+      setSkillText("");
+      setMessage({ tone: "success", title: "Vendor added", message: `${created.vendorName} was added with Vendor ID ${created.vendorCode}. KYC is pending verification.` });
+    } catch (error) {
+      setMessage({ tone: "danger", title: "Vendor save blocked", message: error instanceof Error ? error.message : "Could not save vendor." });
+    } finally {
+      setSavingVendor(false);
+    }
+  }
+
+  return (
+    <section className="grid gap-5 xl:grid-cols-[460px_1fr]">
+      <Panel title="Manual Vendor Add">
+        <Notice
+          tone="warning"
+          title="KYC storage warning"
+          message="Local MVP stores document names and signature preview only. Production must upload Aadhaar/selfie/signature to protected object storage with signed access and audit logs."
+        />
+
+        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+          <Field label="Vendor Name">
+            <input className="field" value={form.vendorName} onChange={(event) => updateForm({ vendorName: event.target.value })} placeholder="Technician / partner name" />
+          </Field>
+          <Field label="Phone Number">
+            <input className="field" value={form.phone} onChange={(event) => updateForm({ phone: event.target.value })} placeholder="98765 43210" />
+          </Field>
+          <Field label="Date of Birth">
+            <input className="field" type="date" value={form.dateOfBirth} onChange={(event) => updateForm({ dateOfBirth: event.target.value })} />
+          </Field>
+          <Field label="Experience Years">
+            <input className="field" type="number" min="0" value={form.experienceYears} onChange={(event) => updateForm({ experienceYears: Number(event.target.value || 0) })} />
+          </Field>
+          <Field label="Pincode">
+            <input className="field" value={form.pincode} onChange={(event) => updateForm({ pincode: event.target.value.replace(/\D/g, "").slice(0, 6) })} />
+          </Field>
+          <Field label="Skills">
+            <input className="field" value={skillText} onChange={(event) => setSkillText(event.target.value)} placeholder="CCTV, DVR, Networking" />
+          </Field>
+        </div>
+
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <Field label="Working Address">
+            <textarea className="field min-h-24" value={form.workingAddress} onChange={(event) => updateForm({ workingAddress: event.target.value })} />
+          </Field>
+          <Field label="Full Address">
+            <textarea className="field min-h-24" value={form.address} onChange={(event) => updateForm({ address: event.target.value })} />
+          </Field>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <FileNamePicker label="Aadhaar Card" value={form.aadhaarDocumentName} onChange={(value) => updateForm({ aadhaarDocumentName: value })} />
+          <FileNamePicker label="Selfie" value={form.selfieDocumentName} onChange={(value) => updateForm({ selfieDocumentName: value })} />
+        </div>
+
+        <div className="mt-4">
+          <Field label="Signature Pad">
+            <SignaturePad value={form.signatureReference} onChange={(signatureReference) => updateForm({ signatureReference })} />
+          </Field>
+        </div>
+
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <Field label="Vendor Type">
+            <select className="field" value={form.teamType} onChange={(event) => changeTeamType(event.target.value as "INDIVIDUAL" | "TEAM")}>
+              <option value="INDIVIDUAL">Individual</option>
+              <option value="TEAM">Team</option>
+            </select>
+          </Field>
+          {form.teamType === "TEAM" ? (
+            <Field label="Team Size">
+              <input className="field" type="number" min="2" value={form.teamSize ?? 2} onChange={(event) => changeTeamSize(event.target.value)} />
+            </Field>
+          ) : null}
+        </div>
+
+        {form.teamType === "TEAM" ? (
+          <div className="mt-4 space-y-3">
+            {(form.teamMembers ?? []).map((member, index) => (
+              <div key={index} className="rounded-md border border-white/10 bg-white/[0.03] p-3">
+                <div className="mb-3 text-sm font-semibold text-cyan-100">Team Member {index + 1}</div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <input className="field" value={member.name} onChange={(event) => updateTeamMember(index, { name: event.target.value })} placeholder="Member name" />
+                  <input className="field" value={member.phone ?? ""} onChange={(event) => updateTeamMember(index, { phone: event.target.value })} placeholder="Phone optional" />
+                  <div className="md:col-span-2">
+                    <FileNamePicker label="Member Aadhaar" value={member.aadhaarDocumentName} onChange={(value) => updateTeamMember(index, { aadhaarDocumentName: value })} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        <button className="primary-button mt-5 w-full" type="button" disabled={savingVendor} onClick={() => void submitVendor()}>
+          {savingVendor ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
+          Add Vendor
+        </button>
+
+        {message ? <Notice tone={message.tone} title={message.title} message={message.message} /> : null}
+      </Panel>
+
+      <Panel
+        title="Vendor List"
+        action={
+          <button className="secondary-button" type="button" disabled={loadingVendors} onClick={() => void loadVendors()}>
+            <RefreshCw className={`h-4 w-4 ${loadingVendors ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        }
+      >
+        <div className="smooth-scroll max-h-[min(78vh,820px)] overflow-auto rounded-md border border-white/10">
+          <table className="w-full min-w-[860px] text-left text-sm">
+            <thead className="sticky top-0 z-10 bg-[#08162c] text-xs uppercase text-slate-400 shadow-[0_1px_0_rgba(255,255,255,0.08)]">
+              <tr>
+                <th className="px-4 py-3">Vendor</th>
+                <th className="px-4 py-3">Phone</th>
+                <th className="px-4 py-3">Pincode</th>
+                <th className="px-4 py-3">Type</th>
+                <th className="px-4 py-3">KYC</th>
+                <th className="px-4 py-3">Skills</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/10">
+              {loadingVendors && !vendors.length ? <VendorSkeletonRows /> : null}
+              {vendors.map((vendor) => (
+                <tr key={vendor.id} className="hover:bg-white/[0.03]">
+                  <td className="px-4 py-3">
+                    <div className="font-semibold">{vendor.vendorName}</div>
+                    <div className="mt-1 text-xs text-cyan-200">{vendor.vendorCode}</div>
+                  </td>
+                  <td className="px-4 py-3">{vendor.phone}</td>
+                  <td className="px-4 py-3">{vendor.pincode}</td>
+                  <td className="px-4 py-3">{formatEnum(vendor.teamType)} {vendor.teamType === "TEAM" ? `(${vendor.teamSize})` : ""}</td>
+                  <td className="px-4 py-3">{formatEnum(vendor.kycStatus)}</td>
+                  <td className="px-4 py-3 text-slate-300">{vendor.skills.length ? vendor.skills.join(", ") : "-"}</td>
+                </tr>
+              ))}
+              {!vendors.length && !loadingVendors ? (
+                <tr>
+                  <td className="px-4 py-8 text-center text-slate-400" colSpan={6}>
+                    No vendors added yet. Add at least one vendor before assigning won work.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+    </section>
+  );
+}
+
+function FileNamePicker({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="block">
+      <span className="mb-2 block text-sm font-semibold text-slate-200">{label}</span>
+      <span className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-white/10 bg-white/[0.03] px-3 py-3 text-sm text-slate-200 transition hover:border-cyan-300/30">
+        <span className="min-w-0 truncate">{value || "Choose file"}</span>
+        <Upload className="h-4 w-4 shrink-0 text-cyan-200" />
+      </span>
+      <input className="hidden" type="file" onChange={(event) => onChange(event.target.files?.[0]?.name ?? "")} />
+    </label>
+  );
+}
+
+function SignaturePad({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const drawing = useRef(false);
+
+  function pointerPosition(event: React.PointerEvent<HTMLCanvasElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * (event.currentTarget.width / rect.width),
+      y: (event.clientY - rect.top) * (event.currentTarget.height / rect.height),
+    };
+  }
+
+  function beginDraw(event: React.PointerEvent<HTMLCanvasElement>) {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+
+    if (!canvas || !context) {
+      return;
+    }
+
+    drawing.current = true;
+    canvas.setPointerCapture(event.pointerId);
+    const position = pointerPosition(event);
+    context.strokeStyle = "#e0f2fe";
+    context.lineWidth = 2;
+    context.lineCap = "round";
+    context.beginPath();
+    context.moveTo(position.x, position.y);
+  }
+
+  function draw(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (!drawing.current) {
+      return;
+    }
+
+    const context = canvasRef.current?.getContext("2d");
+
+    if (!context) {
+      return;
+    }
+
+    const position = pointerPosition(event);
+    context.lineTo(position.x, position.y);
+    context.stroke();
+  }
+
+  function endDraw() {
+    drawing.current = false;
+    const canvas = canvasRef.current;
+
+    if (canvas) {
+      onChange(canvas.toDataURL("image/png"));
+    }
+  }
+
+  function clearSignature() {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+
+    if (!canvas || !context) {
+      return;
+    }
+
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    onChange("");
+  }
+
+  return (
+    <div className="rounded-md border border-white/10 bg-black/20 p-3">
+      <canvas
+        ref={canvasRef}
+        className="h-32 w-full touch-none rounded-md border border-cyan-300/20 bg-[#031023]"
+        height={128}
+        width={420}
+        onPointerDown={beginDraw}
+        onPointerMove={draw}
+        onPointerUp={endDraw}
+        onPointerLeave={endDraw}
+      />
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <span className="text-xs text-slate-400">{value ? "Signature captured" : "Draw vendor signature above"}</span>
+        <button className="secondary-button" type="button" onClick={clearSignature}>
+          Clear
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function VendorSkeletonRows() {
+  return (
+    <>
+      {Array.from({ length: 5 }).map((_, index) => (
+        <tr key={index}>
+          {Array.from({ length: 6 }).map((__, cellIndex) => (
+            <td key={cellIndex} className="px-4 py-3">
+              <div className="h-4 w-full max-w-[160px] animate-pulse rounded bg-white/10" />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
+}
+
+function emptyVendorForm(): CreateVendorInput {
+  return {
+    vendorName: "",
+    phone: "",
+    workingAddress: "",
+    address: "",
+    pincode: "",
+    dateOfBirth: "",
+    experienceYears: 0,
+    aadhaarDocumentName: "",
+    selfieDocumentName: "",
+    signatureReference: "",
+    teamType: "INDIVIDUAL",
+    teamSize: 1,
+    skills: [],
+    teamMembers: [],
+  };
+}
+
+function resizeTeamMembers(existing: VendorTeamMemberInput[], teamSize: number): VendorTeamMemberInput[] {
+  return Array.from({ length: teamSize }).map((_, index) => existing[index] ?? { name: "", phone: "", aadhaarDocumentName: "" });
+}
+
 type UiQuotationItem = {
   id: string;
   itemName: string;
@@ -1080,10 +1877,12 @@ type UiQuotationPackage = {
 };
 
 function LeadDetailWorkspaceV2({
+  session,
   lead,
   onSaveRequested,
   onBack,
 }: {
+  session: DevSession;
   lead: LeadDetail;
   onSaveRequested: (lead: LeadDetail, payload: SaveCallOutcomeInput) => void;
   onBack: () => void;
@@ -1344,7 +2143,7 @@ function LeadDetailWorkspaceV2({
 
       <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
         {isWonLead ? (
-          <WonLeadOperationsPreview lead={lead} />
+          <WonLeadOperationsPanel session={session} lead={lead} />
         ) : (
         <Panel title={isFollowUp ? `${formatEnum(lead.currentIntent)} follow-up #${lead.spokenCount + 1}` : "Raw Lead First Call"}>
           {existingScheduledSiteVisit ? <Notice tone="warning" title="Scheduled site visit follow-up" message="When the customer is spoken to, first record whether the site visit was completed." /> : null}
@@ -1744,53 +2543,515 @@ function WonDetailsPanel({
   );
 }
 
-function WonLeadOperationsPreview({ lead }: { lead: LeadDetail }) {
-  const details = lead.wonDetails;
+function WonLeadOperationsPanel({ session, lead }: { session: DevSession; lead: LeadDetail }) {
+  const [detail, setDetail] = useState<WonLeadOperationDetail | null>(null);
+  const [job, setJob] = useState<JobOperation | null>(null);
+  const [vendors, setVendors] = useState<VendorSummary[]>([]);
+  const [selectedVendorIds, setSelectedVendorIds] = useState<string[]>([]);
+  const [offerPriceRs, setOfferPriceRs] = useState("");
+  const [completionSummary, setCompletionSummary] = useState("");
+  const [vendorBonusRs, setVendorBonusRs] = useState("0");
+  const [vendorDeductionRs, setVendorDeductionRs] = useState("0");
+  const [photoType, setPhotoType] = useState<JobPhotoType>("COMPLETED_WORK");
+  const [photoFileName, setPhotoFileName] = useState("");
+  const [photoNotes, setPhotoNotes] = useState("");
+  const [checklistType, setChecklistType] = useState<JobChecklistType>(lead.currentIntent === "REPAIR_SERVICE" ? "REPAIR_SERVICE" : "INSTALLATION");
+  const [checklistItems, setChecklistItems] = useState<ChecklistItem[]>(() => defaultJobChecklistItems(lead.currentIntent === "REPAIR_SERVICE" ? "REPAIR_SERVICE" : "INSTALLATION"));
+  const [loadingOperations, setLoadingOperations] = useState(false);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ tone: "success" | "warning" | "danger"; title: string; message: string } | null>(null);
+
+  const syncChecklistFromJob = useCallback((nextJob: JobOperation | null) => {
+    if (!nextJob) {
+      return;
+    }
+
+    const nextType = resolveChecklistType(nextJob);
+    const existingChecklist = nextJob.checklists.find((checklist) => checklist.type === nextType) ?? nextJob.checklists[0] ?? null;
+    const effectiveType = existingChecklist?.type ?? nextType;
+    setChecklistType(effectiveType);
+    setChecklistItems(existingChecklist?.items.length ? existingChecklist.items : defaultJobChecklistItems(effectiveType));
+  }, []);
+
+  const loadOperation = useCallback(async () => {
+    setLoadingOperations(true);
+    setMessage(null);
+
+    try {
+      const next = await apiGet<WonLeadOperationDetail>(`/operations/won/${lead.id}`, session);
+      setDetail(next);
+      setJob(next.job);
+      setVendors(next.vendors);
+      syncChecklistFromJob(next.job);
+      setOfferPriceRs(next.job?.vendorOfferPricePaise ? String(paiseToRs(next.job.vendorOfferPricePaise)) : "");
+    } catch (error) {
+      setMessage({ tone: "danger", title: "Operations blocked", message: error instanceof Error ? error.message : "Could not load won operations." });
+    } finally {
+      setLoadingOperations(false);
+    }
+  }, [lead.id, session, syncChecklistFromJob]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadOperation();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [loadOperation]);
+
+  async function runJobAction(label: string, action: () => Promise<JobOperation>, afterSuccess?: (updated: JobOperation) => void) {
+    setActionBusy(label);
+    setMessage(null);
+
+    try {
+      const updated = await action();
+      setJob(updated);
+      setDetail((current) => (current ? { ...current, job: updated } : current));
+      syncChecklistFromJob(updated);
+      afterSuccess?.(updated);
+      setMessage({ tone: "success", title: "Operations updated", message: `${label} completed.` });
+    } catch (error) {
+      setMessage({ tone: "danger", title: `${label} blocked`, message: error instanceof Error ? error.message : "Operation failed." });
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  function toggleVendor(vendorId: string) {
+    setSelectedVendorIds((current) => (current.includes(vendorId) ? current.filter((id) => id !== vendorId) : [...current, vendorId]));
+  }
+
+  function updateChecklistItem(itemId: string, checked: boolean) {
+    setChecklistItems((items) => items.map((item) => (item.id === itemId ? { ...item, checked } : item)));
+  }
+
+  const wonDetails = detail?.wonDetails ?? lead.wonDetails;
+  const canSaveProof = Boolean(job && ["VENDOR_OFFER_SENT", "VENDOR_ASSIGNED", "WORK_STARTED", "WORK_PAUSED"].includes(job.status));
+  const hasCompletedWorkPhoto = Boolean(job?.photos.some((photo) => photo.type === "COMPLETED_WORK"));
+  const submittedChecklist = job?.checklists.find((checklist) => checklist.status === "SUBMITTED" && checklist.items.every((item) => item.checked));
+  const checklistReady = checklistItems.length > 0 && checklistItems.every((item) => item.checked);
+  const proofReady = hasCompletedWorkPhoto && Boolean(submittedChecklist);
+  const certificateRecords = job?.certificates ?? [];
 
   return (
-    <Panel title="Won Lead Operations">
+    <Panel
+      title="Won Lead Execution"
+      action={
+        <button className="secondary-button" type="button" disabled={loadingOperations} onClick={() => void loadOperation()}>
+          <RefreshCw className={`h-4 w-4 ${loadingOperations ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
+      }
+    >
       <Notice
-        tone="warning"
-        title="Operations backend is the next controlled phase"
-        message="This won lead will not show the normal call-outcome dialog. Vendor assignment, work start/pause/end, photos, and PDF certificates must be backed by job, vendor, file-storage, and audit tables before they become active."
+        tone="success"
+        title="Won workflow mode"
+        message="Won leads do not show the raw call dialog. Operations staff now works from job status, vendor offer, work start/pause/close, and certificate history."
       />
 
-      {details ? (
+      {loadingOperations && !detail ? <InlineProgress message="Loading won execution details..." /> : null}
+      {message ? <Notice tone={message.tone} title={message.title} message={message.message} /> : null}
+
+      {wonDetails ? (
         <div className="mt-4 grid gap-3 md:grid-cols-2">
-          <Info label="Site Contact" value={details.siteContactNumber} />
-          <Info label="Schedule" value={details.scheduledAt ? formatDateTime(details.scheduledAt) : formatEnum(details.scheduleStatus)} />
-          <Info label="Quoted Price" value={`Rs ${paiseToRs(details.quotedPricePaise)}`} />
-          <Info label="Accepted Price" value={`Rs ${paiseToRs(details.acceptedPricePaise)}`} />
-          <Info label="Advance Payment" value={`Rs ${paiseToRs(details.advancePaymentPaise)}`} />
-          <Info label="Scope" value={details.scopeOfWork} />
+          <Info label="Site Contact" value={wonDetails.siteContactNumber} />
+          <Info label="Schedule" value={wonDetails.scheduledAt ? formatDateTime(wonDetails.scheduledAt) : formatEnum(wonDetails.scheduleStatus)} />
+          <Info label="Quoted Price" value={`Rs ${paiseToRs(wonDetails.quotedPricePaise)}`} />
+          <Info label="Accepted Price" value={`Rs ${paiseToRs(wonDetails.acceptedPricePaise)}`} />
+          <Info label="Advance Payment" value={`Rs ${paiseToRs(wonDetails.advancePaymentPaise)}`} />
+          <Info label="Scope" value={wonDetails.scopeOfWork} />
           <div className="md:col-span-2">
-            <Info label="Location / Written Address" value={details.address} />
+            <Info label="Location / Written Address" value={wonDetails.address} />
           </div>
         </div>
       ) : (
-        <Notice tone="danger" title="Won details missing" message="This record is marked won but does not have won customer details. Fix this before operations starts." />
+        <Notice tone="danger" title="Won details missing" message="This lead is marked won but does not have won details. Fix won details before operations starts." />
       )}
 
-      <div className="mt-5 grid gap-3 md:grid-cols-4">
-        <OperationStep title="Assign Work" text="Needs vendor database, offer price, and vendor WhatsApp message generation." />
-        <OperationStep title="Work Started" text="Needs job status, timestamps, overdue notifications, and audit log." />
-        <OperationStep title="Photos / Checklist" text="Needs protected storage and upload progress before mobile field usage." />
-        <OperationStep title="Completion PDF" text="Needs certificate templates saved to customer and vendor history." />
+      <div className="mt-5 rounded-md border border-cyan-300/20 bg-cyan-300/5 p-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="font-semibold text-cyan-100">Operations Job</div>
+            <p className="mt-1 text-sm text-slate-300">Create the job once, then assign vendors and execute work from the same record.</p>
+          </div>
+          {!job ? (
+            <button
+              className="primary-button"
+              type="button"
+              disabled={Boolean(actionBusy) || !wonDetails}
+              onClick={() => void runJobAction("Create job", () => apiPost<JobOperation>(`/operations/won/${lead.id}/job`, session, {}))}
+            >
+              {actionBusy === "Create job" ? <Loader2 className="h-4 w-4 animate-spin" /> : <BriefcaseBusiness className="h-4 w-4" />}
+              Create Operations Job
+            </button>
+          ) : (
+            <StatusBadge label={formatEnum(job.status)} />
+          )}
+        </div>
+
+        {job ? (
+          <div className="mt-4 grid gap-3 md:grid-cols-4">
+            <Info label="Job ID" value={job.id.slice(0, 8)} />
+            <Info label="Status" value={formatEnum(job.status)} />
+            <Info label="Assigned Vendor" value={job.assignedVendorName ?? "-"} />
+            <Info label="Started" value={job.startedAt ? formatDateTime(job.startedAt) : "-"} />
+          </div>
+        ) : null}
       </div>
+
+      {job ? (
+        <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+          <section className="rounded-md border border-white/10 bg-white/[0.03] p-4">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-semibold">Assign Work</h3>
+                <p className="mt-1 text-sm text-slate-300">Vendor message includes only customer/job details and vendor offer price. It never includes customer accepted price or company margin.</p>
+              </div>
+              <Send className="h-5 w-5 text-cyan-200" />
+            </div>
+
+            <Field label="Vendor Offer Price">
+              <input className="field" type="number" min="0" value={offerPriceRs} onChange={(event) => setOfferPriceRs(event.target.value.replace(/\D/g, ""))} placeholder="Amount in Rs" />
+            </Field>
+
+            <div className="mt-4 max-h-72 overflow-auto rounded-md border border-white/10">
+              {vendors.map((vendor) => (
+                <label key={vendor.id} className="flex cursor-pointer items-start gap-3 border-b border-white/10 px-3 py-3 last:border-b-0 hover:bg-white/[0.03]">
+                  <input className="mt-1" type="checkbox" checked={selectedVendorIds.includes(vendor.id)} onChange={() => toggleVendor(vendor.id)} />
+                  <span className="min-w-0">
+                    <span className="block font-semibold">{vendor.vendorName}</span>
+                    <span className="mt-1 block text-xs text-cyan-200">{vendor.phone} | {vendor.pincode} | {formatEnum(vendor.kycStatus)}</span>
+                    <span className="mt-1 block text-xs text-slate-400">{vendor.skills.length ? vendor.skills.join(", ") : "No skills tagged"}</span>
+                  </span>
+                </label>
+              ))}
+              {!vendors.length ? <div className="px-3 py-6 text-center text-sm text-slate-400">No vendors added yet. Add vendors from the Vendors section first.</div> : null}
+            </div>
+
+            <button
+              className="primary-button mt-4 w-full"
+              type="button"
+              disabled={Boolean(actionBusy) || !selectedVendorIds.length || !offerPriceRs}
+              onClick={() =>
+                void runJobAction("Assign vendors", () =>
+                  apiPost<JobOperation>(`/operations/jobs/${job.id}/assign`, session, {
+                    vendorIds: selectedVendorIds,
+                    offerPriceRs: Number(offerPriceRs || 0),
+                  }),
+                )
+              }
+            >
+              {actionBusy === "Assign vendors" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              Generate Vendor Offer
+            </button>
+          </section>
+
+          <section className="rounded-md border border-white/10 bg-white/[0.03] p-4">
+            <div className="mb-4 flex items-start gap-3">
+              <ClipboardCheck className="mt-0.5 h-5 w-5 text-cyan-200" />
+              <div>
+                <h3 className="font-semibold">Work Execution</h3>
+                <p className="mt-1 text-sm text-slate-300">Fast status buttons with backend timestamps and event history.</p>
+              </div>
+            </div>
+            <div className="grid gap-3">
+              <button
+                className="primary-button w-full"
+                type="button"
+                disabled={Boolean(actionBusy) || !["VENDOR_OFFER_SENT", "VENDOR_ASSIGNED", "WORK_PAUSED"].includes(job.status)}
+                onClick={() => void runJobAction(job.status === "WORK_PAUSED" ? "Resume work" : "Work started", () => apiPost<JobOperation>(`/operations/jobs/${job.id}/start`, session, {}))}
+              >
+                {actionBusy === "Work started" || actionBusy === "Resume work" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                {job.status === "WORK_PAUSED" ? "Resume Work" : "Work Started"}
+              </button>
+              <button
+                className="secondary-button w-full"
+                type="button"
+                disabled={Boolean(actionBusy) || job.status !== "WORK_STARTED"}
+                onClick={() => void runJobAction("Pause work", () => apiPost<JobOperation>(`/operations/jobs/${job.id}/pause`, session, {}))}
+              >
+                {actionBusy === "Pause work" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Pause className="h-4 w-4" />}
+                Pause Work
+              </button>
+            </div>
+
+            <div className="mt-4 rounded-md border border-white/10 bg-black/15 p-3">
+              <div className="flex items-start gap-3">
+                <Upload className="mt-0.5 h-5 w-5 text-cyan-200" />
+                <div>
+                  <div className="font-semibold">Proof Required</div>
+                  <p className="mt-1 text-sm text-slate-300">Close work only after completed-work photo proof and a submitted checklist are saved.</p>
+                </div>
+              </div>
+
+              <div className="mt-3 grid gap-3">
+                <Field label="Photo Proof Type">
+                  <select className="field" value={photoType} onChange={(event) => setPhotoType(event.target.value as JobPhotoType)}>
+                    <option value="BEFORE_WORK">Before Work</option>
+                    <option value="ISSUE_PHOTO">Issue Photo</option>
+                    <option value="COMPLETED_WORK">Completed Work</option>
+                    <option value="CUSTOMER_CONFIRMATION">Customer Confirmation</option>
+                    <option value="OTHER">Other</option>
+                  </select>
+                </Field>
+                <label className="secondary-button w-full cursor-pointer justify-center">
+                  <Upload className="h-4 w-4" />
+                  {photoFileName || "Choose Proof File"}
+                  <input className="hidden" type="file" accept="image/*,video/*,.pdf" onChange={(event) => setPhotoFileName(event.target.files?.[0]?.name ?? "")} />
+                </label>
+                <Field label="Proof Notes">
+                  <textarea className="field min-h-20" value={photoNotes} onChange={(event) => setPhotoNotes(event.target.value)} placeholder="Short note about this proof." />
+                </Field>
+                <button
+                  className="secondary-button w-full"
+                  type="button"
+                  disabled={Boolean(actionBusy) || !canSaveProof || !photoFileName}
+                  onClick={() =>
+                    void runJobAction(
+                      "Save photo proof",
+                      () =>
+                        apiPost<JobOperation>(`/operations/jobs/${job.id}/photos`, session, {
+                          type: photoType,
+                          fileName: photoFileName,
+                          notes: photoNotes,
+                        }),
+                      () => {
+                        setPhotoFileName("");
+                        setPhotoNotes("");
+                      },
+                    )
+                  }
+                >
+                  {actionBusy === "Save photo proof" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                  Save Photo Proof
+                </button>
+              </div>
+
+              {job.photos.length ? (
+                <div className="mt-3 space-y-2">
+                  {job.photos.slice(0, 4).map((photo) => (
+                    <div key={photo.id} className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-xs">
+                      <div className="font-semibold text-slate-100">{formatEnum(photo.type)} - {photo.fileName}</div>
+                      <div className="mt-1 text-slate-400">{formatDateTime(photo.uploadedAt)}{photo.notes ? ` | ${photo.notes}` : ""}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="mt-4 rounded-md border border-white/10 bg-white/[0.03] p-3">
+                <Field label="Checklist Type">
+                  <select
+                    className="field"
+                    value={checklistType}
+                    onChange={(event) => {
+                      const nextType = event.target.value as JobChecklistType;
+                      const existingChecklist = job.checklists.find((checklist) => checklist.type === nextType);
+                      setChecklistType(nextType);
+                      setChecklistItems(existingChecklist?.items.length ? existingChecklist.items : defaultJobChecklistItems(nextType));
+                    }}
+                  >
+                    <option value="INSTALLATION">Installation Checklist</option>
+                    <option value="REPAIR_SERVICE">Repair / Service Checklist</option>
+                  </select>
+                </Field>
+                <div className="mt-3 space-y-2">
+                  {checklistItems.map((item) => (
+                    <label key={item.id} className="flex items-start gap-3 rounded-md border border-white/10 bg-black/15 px-3 py-2 text-sm">
+                      <input className="mt-1" type="checkbox" checked={item.checked} onChange={(event) => updateChecklistItem(item.id, event.target.checked)} />
+                      <span>{item.label}</span>
+                    </label>
+                  ))}
+                </div>
+                <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                  <button
+                    className="secondary-button w-full"
+                    type="button"
+                    disabled={Boolean(actionBusy) || !canSaveProof}
+                    onClick={() =>
+                      void runJobAction("Save checklist", () =>
+                        apiPost<JobOperation>(`/operations/jobs/${job.id}/checklist`, session, {
+                          type: checklistType,
+                          items: checklistItems,
+                          submit: false,
+                        }),
+                      )
+                    }
+                  >
+                    {actionBusy === "Save checklist" ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardCheck className="h-4 w-4" />}
+                    Save Draft
+                  </button>
+                  <button
+                    className="primary-button w-full"
+                    type="button"
+                    disabled={Boolean(actionBusy) || !canSaveProof || !checklistReady}
+                    onClick={() =>
+                      void runJobAction("Submit checklist", () =>
+                        apiPost<JobOperation>(`/operations/jobs/${job.id}/checklist`, session, {
+                          type: checklistType,
+                          items: checklistItems,
+                          submit: true,
+                        }),
+                      )
+                    }
+                  >
+                    {actionBusy === "Submit checklist" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                    Submit Checklist
+                  </button>
+                </div>
+                {submittedChecklist ? (
+                  <p className="mt-3 text-xs font-semibold text-emerald-200">Checklist submitted at {submittedChecklist.submittedAt ? formatDateTime(submittedChecklist.submittedAt) : "saved time"}.</p>
+                ) : (
+                  <p className="mt-3 text-xs text-amber-200">Checklist is not submitted yet. Every item must be checked before closing.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {!proofReady ? (
+                <Notice
+                  tone="warning"
+                  title="Completion locked"
+                  message="Save at least one Completed Work photo and submit the checklist before closing this won lead."
+                />
+              ) : null}
+              <Field label="Completion Summary">
+                <textarea className="field min-h-24" value={completionSummary} onChange={(event) => setCompletionSummary(event.target.value)} placeholder="What was completed, timing, customer confirmation, pending issue if any." />
+              </Field>
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                <Field label="Vendor Bonus">
+                  <input className="field" type="number" min="0" value={vendorBonusRs} onChange={(event) => setVendorBonusRs(event.target.value.replace(/\D/g, ""))} />
+                </Field>
+                <Field label="Vendor Deduction">
+                  <input className="field" type="number" min="0" value={vendorDeductionRs} onChange={(event) => setVendorDeductionRs(event.target.value.replace(/\D/g, ""))} />
+                </Field>
+              </div>
+              <button
+                className="primary-button w-full"
+                type="button"
+                disabled={Boolean(actionBusy) || !["WORK_STARTED", "WORK_PAUSED"].includes(job.status) || !proofReady}
+                onClick={() =>
+                  void runJobAction("Complete work", () =>
+                    apiPost<JobOperation>(`/operations/jobs/${job.id}/complete`, session, {
+                      completionSummary,
+                      vendorBonusRs: Number(vendorBonusRs || 0),
+                      vendorDeductionRs: Number(vendorDeductionRs || 0),
+                    }),
+                  )
+                }
+              >
+                {actionBusy === "Complete work" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileCheck2 className="h-4 w-4" />}
+                Complete & Save Certificate
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {job?.offers.length ? (
+        <section className="mt-5 rounded-md border border-white/10 bg-white/[0.03] p-4">
+          <h3 className="font-semibold">Generated Vendor WhatsApp Offers</h3>
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            {job.offers.map((offer) => (
+              <div key={offer.id} className="rounded-md border border-white/10 bg-black/20 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="font-semibold">{offer.vendorName}</div>
+                    <div className="mt-1 text-xs text-cyan-200">Offer: Rs {paiseToRs(offer.offerPricePaise)}</div>
+                  </div>
+                  <button className="secondary-button" type="button" onClick={() => window.open(whatsappRedirectUrl(offer.vendorPhone, offer.messageBody), "_blank", "noopener,noreferrer")}>
+                    <Send className="h-4 w-4" />
+                    WhatsApp
+                  </button>
+                </div>
+                <pre className="mt-3 whitespace-pre-wrap rounded-md border border-white/10 bg-[#031023] p-3 text-xs leading-5 text-slate-200">{offer.messageBody}</pre>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {certificateRecords.length || job?.completionCertificateText ? (
+        <section className="mt-5 rounded-md border border-emerald-300/20 bg-emerald-300/5 p-4">
+          <div className="mb-3 flex items-center gap-2 font-semibold text-emerald-100">
+            <FileCheck2 className="h-5 w-5" />
+            Saved Completion Certificates
+          </div>
+          {certificateRecords.length ? (
+            <div className="grid gap-3 lg:grid-cols-2">
+              {certificateRecords.map((certificate) => (
+                <div key={certificate.id} className="rounded-md border border-white/10 bg-[#031023] p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-semibold">{certificate.title}</div>
+                      <div className="mt-1 text-xs text-emerald-200">{formatEnum(certificate.audience)} | {formatDateTime(certificate.issuedAt)}</div>
+                    </div>
+                    <span className="rounded-md border border-emerald-300/20 px-2 py-1 text-xs text-emerald-100">PDF ready</span>
+                  </div>
+                  <pre className="smooth-scroll mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-sm leading-6 text-slate-200">{certificate.bodyText}</pre>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <pre className="smooth-scroll max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-white/10 bg-[#031023] p-4 text-sm leading-6 text-slate-200">{job?.completionCertificateText ?? ""}</pre>
+          )}
+        </section>
+      ) : null}
+
+      {job?.events.length ? (
+        <section className="mt-5 rounded-md border border-white/10 bg-white/[0.03] p-4">
+          <h3 className="font-semibold">Operations History</h3>
+          <div className="mt-3 space-y-2">
+            {job.events.map((event) => (
+              <div key={event.id} className="grid gap-2 rounded-md border border-white/10 bg-black/15 px-3 py-2 text-sm md:grid-cols-[170px_1fr]">
+                <div className="text-cyan-200">{formatDateTime(event.createdAt)}</div>
+                <div>
+                  <span className="font-semibold">{formatEnum(event.type)}</span>
+                  <span className="text-slate-300"> - {event.summary}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </Panel>
   );
 }
 
-function OperationStep({ title, text }: { title: string; text: string }) {
-  return (
-    <div className="rounded-md border border-white/10 bg-white/[0.03] p-4">
-      <div className="font-semibold text-cyan-100">{title}</div>
-      <p className="mt-2 text-sm leading-6 text-slate-300">{text}</p>
-      <button className="secondary-button mt-4 w-full opacity-60" type="button" disabled>
-        Backend phase required
-      </button>
-    </div>
-  );
+function resolveChecklistType(job: JobOperation): JobChecklistType {
+  return job.jobType.toLowerCase().includes("repair") || job.jobType.toLowerCase().includes("service") ? "REPAIR_SERVICE" : "INSTALLATION";
+}
+
+function defaultJobChecklistItems(type: JobChecklistType): ChecklistItem[] {
+  const labels =
+    type === "REPAIR_SERVICE"
+      ? [
+          "Issue identified and explained",
+          "Repair/service work completed",
+          "Camera/system tested",
+          "Customer informed about result",
+          "Completed work photos uploaded",
+          "Remaining issue mentioned if any",
+        ]
+      : [
+          "Cameras installed",
+          "DVR/NVR connected",
+          "Power and display checked",
+          "Recording checked",
+          "Mobile view configured",
+          "Completed work photos uploaded",
+          "Customer shown basic usage",
+          "Site cleaned",
+        ];
+
+  return labels.map((label, index) => ({
+    id: `${type.toLowerCase()}-${index + 1}`,
+    label,
+    checked: false,
+  }));
+}
+
+function StatusBadge({ label }: { label: string }) {
+  return <span className="rounded-md border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-sm font-semibold text-cyan-100">{label}</span>;
 }
 
 function TimelineEventCard({ event, onInspect }: { event: LeadDetail["timeline"][number]; onInspect: () => void }) {

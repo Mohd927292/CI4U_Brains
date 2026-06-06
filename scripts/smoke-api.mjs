@@ -136,12 +136,94 @@ assert(won.currentStage === "CAPTURED_WON", "won lead moves to Won Leads");
 assert(won.wonDetails.acceptedPricePaise === 2300000, "won accepted price stored in paise");
 
 const counts = await request("GET", "/leads/counts");
+
+const vendor = await request("POST", "/operations/vendors", {
+  vendorName: "Smoke Partner",
+  phone: `97${phoneSuffix}4`,
+  workingAddress: "Smoke vendor working area",
+  address: "Smoke vendor full address",
+  pincode: "560011",
+  dateOfBirth: "1992-01-01",
+  experienceYears: 6,
+  aadhaarDocumentName: "aadhaar-smoke.jpg",
+  selfieDocumentName: "selfie-smoke.jpg",
+  signatureReference: "signature-smoke",
+  teamType: "INDIVIDUAL",
+  skills: ["CCTV"],
+});
+assert(vendor.phone.startsWith("+91"), "vendor phone is normalized");
+
+const operationDetail = await request("GET", `/operations/won/${won.id}`);
+assert(operationDetail.wonDetails.acceptedPricePaise === 2300000, "won details are visible in operations");
+
+const job = await request("POST", `/operations/won/${won.id}/job`, {});
+assert(job.status === "WAITING_VENDOR_ASSIGNMENT", "job starts in vendor assignment queue");
+
+const assigned = await request("POST", `/operations/jobs/${job.id}/assign`, {
+  vendorIds: [vendor.id],
+  offerPriceRs: 18000,
+});
+assert(assigned.status === "VENDOR_OFFER_SENT", "vendor offer is sent");
+assert(assigned.offers[0].messageBody.includes("Vendor offer price: Rs 18000"), "vendor message includes offer price");
+assert(!assigned.offers[0].messageBody.includes("23000"), "vendor message hides accepted customer price");
+
+const started = await request("POST", `/operations/jobs/${job.id}/start`, {});
+assert(started.status === "WORK_STARTED", "work can start after assignment");
+
+await expectFailure(
+  () =>
+    request("POST", `/operations/jobs/${job.id}/complete`, {
+      completionSummary: "Smoke work completed.",
+      vendorBonusRs: 0,
+      vendorDeductionRs: 0,
+    }),
+  "completed-work photo",
+);
+
+const withPhoto = await request("POST", `/operations/jobs/${job.id}/photos`, {
+  type: "COMPLETED_WORK",
+  fileName: "smoke-completed.jpg",
+  notes: "Smoke completed proof.",
+});
+assert(withPhoto.photos.some((photo) => photo.type === "COMPLETED_WORK"), "completed work proof is saved");
+
+const withChecklist = await request("POST", `/operations/jobs/${job.id}/checklist`, {
+  type: "INSTALLATION",
+  submit: true,
+  items: [
+    { id: "installed", label: "Cameras installed", checked: true },
+    { id: "tested", label: "Recording checked", checked: true },
+  ],
+});
+assert(withChecklist.checklists.some((checklist) => checklist.status === "SUBMITTED"), "submitted checklist is saved");
+
+const completed = await request("POST", `/operations/jobs/${job.id}/complete`, {
+  completionSummary: "Smoke work completed and certificate generated.",
+  vendorBonusRs: 0,
+  vendorDeductionRs: 0,
+});
+assert(completed.status === "CLOSED", "job closes after proof and checklist");
+assert(completed.certificates.length === 2, "customer and vendor certificates are stored");
+
 console.log(
   JSON.stringify(
     {
       status: "ok",
       baseUrl,
-      checked: ["health", "dev auth isolation", "raw create", "warm", "quotation", "won details"],
+      checked: [
+        "health",
+        "dev auth isolation",
+        "raw create",
+        "warm",
+        "quotation",
+        "won details",
+        "vendor create",
+        "job create",
+        "vendor assignment",
+        "work start",
+        "proof-gated completion",
+        "completion certificates",
+      ],
       counts,
     },
     null,

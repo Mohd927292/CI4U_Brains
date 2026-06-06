@@ -21,6 +21,18 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      - key: CI4U_SUPABASE_URL
+        sync: false
+      - key: CI4U_SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: CI4U_SUPABASE_ANON_KEY
+        sync: false
+      - key: CI4U_SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: CI4U_FOUNDER_EMAIL
+        value: syedci4u@gmail.com
+      - key: CI4U_AUTH_INVITE_REDIRECT_URL
+        sync: false
       - key: CI4U_AUTH_JWKS_URL
         sync: false
       - key: CI4U_AUTH_ISSUER

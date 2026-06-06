@@ -10,6 +10,8 @@ const requiredRenderEnvKeys = [
   "CI4U_ALLOW_DEV_AUTH_IN_PRODUCTION",
   "CI4U_WEB_ORIGINS",
   "DATABASE_URL",
+  "CI4U_SUPABASE_URL",
+  "CI4U_FOUNDER_EMAIL",
 ];
 
 if (process.argv.includes("--check-render-blueprint")) {
@@ -109,8 +111,21 @@ export function validateRuntimeEnv(env) {
     }
 
     checked.push("CI4U_AUTH_MODE=jwt");
+  } else if (authMode === "supabase") {
+    if (!env.CI4U_SUPABASE_URL || env.CI4U_SUPABASE_URL.includes("<")) {
+      errors.push("Supabase auth requires CI4U_SUPABASE_URL.");
+    }
+
+    if (
+      (!env.CI4U_SUPABASE_PUBLISHABLE_KEY || env.CI4U_SUPABASE_PUBLISHABLE_KEY.includes("<")) &&
+      (!env.CI4U_SUPABASE_ANON_KEY || env.CI4U_SUPABASE_ANON_KEY.includes("<"))
+    ) {
+      errors.push("Supabase auth requires CI4U_SUPABASE_PUBLISHABLE_KEY or CI4U_SUPABASE_ANON_KEY.");
+    }
+
+    checked.push("CI4U_AUTH_MODE=supabase");
   } else {
-    errors.push("CI4U_AUTH_MODE must be dev or jwt.");
+    errors.push("CI4U_AUTH_MODE must be dev, jwt, or supabase.");
   }
 
   return {

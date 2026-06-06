@@ -5,9 +5,17 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 const webUrl = (process.env.CI4U_SMOKE_WEB_URL ?? "http://127.0.0.1:3001").replace(/\/$/, "");
+const apiBaseUrl = (process.env.CI4U_SMOKE_API_BASE_URL ?? "http://127.0.0.1:4000/v1").replace(/\/$/, "");
 const chromePath = process.env.CI4U_CHROME_PATH ?? findChromePath();
 const screenshotPath = process.env.CI4U_SMOKE_SCREENSHOT_PATH ?? path.join(os.tmpdir(), "ci4u-web-smoke.png");
 const profileDir = await fs.mkdtemp(path.join(os.tmpdir(), "ci4u-chrome-"));
+const apiHeaders = {
+  "content-type": "application/json",
+  "x-ci4u-data-scope": "development",
+  "x-ci4u-dev-user-id": "dev-web-smoke",
+  "x-ci4u-dev-user-name": "Web Smoke",
+  "x-ci4u-dev-role": "FOUNDER",
+};
 
 const chrome = spawn(
   chromePath,
@@ -73,6 +81,10 @@ try {
   const phone = `9${unique}`;
   const nextCustomerName = `UI Smoke Next ${unique}`;
   const nextPhone = `8${unique}`;
+  const wonCustomerName = `UI Won ${unique}`;
+  const wonPhone = `7${unique}`;
+
+  await createWonLeadViaApi(wonCustomerName, wonPhone);
 
   await setRawLeadForm(page, customerName, phone);
   await clickButtonContaining(page, "Create Raw Lead");
@@ -103,6 +115,15 @@ try {
   await waitForText(page, customerName, 15000);
   const queueSwitchMs = Date.now() - queueSwitchStartedAt;
 
+  await clickButtonContaining(page, "Won Leads");
+  await waitForPanelTitle(page, "Won Leads", 15000);
+  await waitForText(page, wonCustomerName, 15000);
+  await clickOpenForCustomer(page, wonCustomerName);
+  await waitForText(page, "Won Lead Execution", 15000);
+  await clickButtonContaining(page, "Create Operations Job");
+  await waitForText(page, "Proof Required", 15000);
+  await scrollTextIntoView(page, "Proof Required");
+
   const screenshot = await page.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
   await fs.writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
 
@@ -115,9 +136,22 @@ try {
       {
         status: "ok",
         webUrl,
+        apiBaseUrl,
         handoffMs,
         queueSwitchMs,
-        checked: ["dev login", "dashboard", "sidebar toggle-ready layout", "manual raw leads", "lead detail", "warm background save", "instant next-lead handoff", "warm queue switch", "whatsapp draft"],
+        checked: [
+          "dev login",
+          "dashboard",
+          "sidebar toggle-ready layout",
+          "manual raw leads",
+          "lead detail",
+          "warm background save",
+          "instant next-lead handoff",
+          "warm queue switch",
+          "whatsapp draft",
+          "won lead operations panel",
+          "proof required section",
+        ],
         screenshotPath,
       },
       null,
@@ -328,6 +362,24 @@ async function waitForTextareaValue(page, text, timeoutMs) {
   throw new Error(`Timed out waiting for textarea value "${text}".`);
 }
 
+async function scrollTextIntoView(page, text) {
+  await evaluate(
+    page,
+    `(() => {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node) {
+        if (node.textContent?.includes(${JSON.stringify(text)})) {
+          node.parentElement?.scrollIntoView({ block: "center" });
+          return true;
+        }
+        node = walker.nextNode();
+      }
+      return false;
+    })()`,
+  );
+}
+
 async function waitForLeadHandoff(page, previousHeading, timeoutMs) {
   const startedAt = Date.now();
 
@@ -422,6 +474,53 @@ async function setLeadCallUpdate(page, update) {
       return true;
     })()`,
   );
+}
+
+async function createWonLeadViaApi(customerName, phone) {
+  const leadResponse = await apiRequest("POST", "/leads/manual", {
+    businessName: customerName,
+    phone,
+    source: "WEB_SMOKE",
+  });
+
+  if (leadResponse.outcome !== "created") {
+    throw new Error(`Expected web smoke won lead to be created. Got ${JSON.stringify(leadResponse)}`);
+  }
+
+  await apiRequest("POST", `/leads/${leadResponse.lead.id}/call-outcome`, {
+    callOutcome: "SPOKE",
+    conversationSummary: "Web smoke customer accepted installation.",
+    leadIntent: "INSTALLATION",
+    followUpReason: "WON",
+    wonDetails: {
+      siteContactNumber: `+91${phone}`,
+      useCustomerPhoneAsSiteContact: true,
+      address: "Web smoke won address",
+      scopeOfWork: "Install CCTV and verify recording.",
+      scheduleStatus: "NOT_SCHEDULED",
+      quotedPriceRs: 18000,
+      acceptedPriceRs: 16000,
+      advancePaymentRs: 2000,
+    },
+  });
+
+  return leadResponse.lead;
+}
+
+async function apiRequest(method, pathName, body) {
+  const response = await fetch(`${apiBaseUrl}${pathName}`, {
+    method,
+    headers: apiHeaders,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : null;
+
+  if (!response.ok) {
+    throw new Error(`${method} ${pathName} failed with ${response.status}: ${text}`);
+  }
+
+  return payload;
 }
 
 function sleep(ms) {
