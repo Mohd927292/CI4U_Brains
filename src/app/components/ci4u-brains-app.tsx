@@ -152,6 +152,7 @@ export function Ci4uBrainsApp() {
   const [pendingSaveCount, setPendingSaveCount] = useState(0);
   const [notifications, setNotifications] = useState<NotificationSummary[]>([]);
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
+  const [passwordPanelOpen, setPasswordPanelOpen] = useState(false);
   const leadDetailCache = useRef<Map<string, LeadDetail>>(new Map());
   const queueCache = useRef<Map<LeadQueue, RawLeadListItem[]>>(new Map());
   const queueRequestId = useRef(0);
@@ -450,6 +451,7 @@ export function Ci4uBrainsApp() {
     setQueueCounts(emptyQueueCounts);
     setNotifications([]);
     setNotificationPanelOpen(false);
+    setPasswordPanelOpen(false);
     setSelectedLead(null);
     setQueueLoading(null);
     setFailedSave(null);
@@ -475,6 +477,24 @@ export function Ci4uBrainsApp() {
       await apiPost<NotificationSummary>(`/auth/notifications/${notificationId}/read`, session, {});
     } catch {
       void loadNotifications(session);
+    }
+  }
+
+  async function changeProductionPassword(newPassword: string) {
+    if (session?.authMode !== "supabase") {
+      throw new Error("Password changes are only available for production Supabase users.");
+    }
+
+    const supabase = getSupabaseBrowserClient();
+
+    if (!supabase) {
+      throw new Error("Supabase Auth is not configured in this browser.");
+    }
+
+    const { error: passwordError } = await supabase.auth.updateUser({ password: newPassword });
+
+    if (passwordError) {
+      throw new Error(passwordError.message);
     }
   }
 
@@ -619,7 +639,7 @@ export function Ci4uBrainsApp() {
       <div className="flex min-h-screen">
         <aside className={`${sidebarOpen ? "lg:block" : "lg:hidden"} hidden w-[318px] shrink-0 border-r border-white/10 bg-[#020b19] px-4 py-5`}>
           <BrandBlock />
-          <DevScopeCard session={session} onLogout={logout} />
+          <DevScopeCard session={session} onLogout={logout} onOpenPasswordPanel={() => setPasswordPanelOpen(true)} />
           <nav className="mt-4 space-y-2">
             <NavButton active={activeView === "dashboard"} icon={LayoutDashboard} label="Dashboard" onClick={() => setActiveView("dashboard")} />
             <NavButton active={activeView === "raw-leads" && activeQueue === "RAW"} icon={UsersRound} label="Raw Leads" count={queueCounts.RAW} onClick={() => openQueue("RAW")} />
@@ -646,10 +666,14 @@ export function Ci4uBrainsApp() {
             onToggleSidebar={() => setSidebarOpen((value) => !value)}
             onToggleNotifications={() => setNotificationPanelOpen((value) => !value)}
             onMarkNotificationRead={(notificationId) => void markNotificationRead(notificationId)}
+            onOpenPasswordPanel={() => setPasswordPanelOpen(true)}
             onLogout={() => void logout()}
           />
           <div className="mx-auto flex w-full max-w-[1540px] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
             {error ? <Notice tone="danger" title="Action blocked" message={error} /> : null}
+            {passwordPanelOpen && session.authMode === "supabase" ? (
+              <PasswordChangePanel onClose={() => setPasswordPanelOpen(false)} onChangePassword={changeProductionPassword} />
+            ) : null}
             {failedSave ? <SaveFailureBanner failure={failedSave} onRetry={retryFailedSave} onReopen={reopenFailedSaveLead} /> : null}
             {!failedSave && pendingSaveCount > 0 ? <SavePendingBanner count={pendingSaveCount} /> : null}
             {workMessage ? <Notice tone="success" title="Workflow progress" message={workMessage} /> : null}
@@ -703,15 +727,46 @@ function AccessLogin({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
 
   async function submitProductionLogin() {
     setBusy(true);
     setError(null);
+    setResetMessage(null);
 
     try {
       await onProductionLogin(email, password);
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "Login failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendPasswordReset() {
+    const supabase = getSupabaseBrowserClient();
+
+    if (!supabase) {
+      setError("Production login is not configured. Set Supabase browser environment variables first.");
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setResetMessage(null);
+
+    try {
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+        redirectTo: window.location.origin,
+      });
+
+      if (resetError) {
+        throw resetError;
+      }
+
+      setResetMessage("Password reset email sent. Open the email, complete Supabase verification, then return here.");
+    } catch (resetError) {
+      setError(resetError instanceof Error ? resetError.message : "Could not send reset email.");
     } finally {
       setBusy(false);
     }
@@ -731,6 +786,7 @@ function AccessLogin({
             </div>
           </div>
           {error ? <Notice tone="danger" title="Login blocked" message={error} /> : null}
+          {resetMessage ? <Notice tone="success" title="Reset email sent" message={resetMessage} /> : null}
           <div className="grid gap-4">
             <Field label="Email">
               <input className="field" type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
@@ -745,6 +801,9 @@ function AccessLogin({
             <button className="primary-button w-full" type="button" disabled={busy || !email.trim() || !password} onClick={() => void submitProductionLogin()}>
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LockKeyhole className="h-4 w-4" />}
               Login
+            </button>
+            <button className="secondary-button w-full" type="button" disabled={busy || !email.trim()} onClick={() => void sendPasswordReset()}>
+              Send password reset email
             </button>
           </div>
         </section>
@@ -784,6 +843,91 @@ function AccessLogin({
   );
 }
 
+function PasswordChangePanel({
+  onClose,
+  onChangePassword,
+}: {
+  onClose: () => void;
+  onChangePassword: (newPassword: string) => Promise<void>;
+}) {
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ tone: "success" | "danger"; title: string; message: string } | null>(null);
+  const canSubmit = newPassword.length >= 8 && newPassword === confirmPassword;
+
+  async function submitPasswordChange() {
+    if (!canSubmit) {
+      setMessage({
+        tone: "danger",
+        title: "Password blocked",
+        message: "Use at least 8 characters and make sure both password fields match.",
+      });
+      return;
+    }
+
+    setBusy(true);
+    setMessage(null);
+
+    try {
+      await onChangePassword(newPassword);
+      setNewPassword("");
+      setConfirmPassword("");
+      setMessage({
+        tone: "success",
+        title: "Password changed",
+        message: "Your Supabase Auth password has been updated. Use the new password next time you log in.",
+      });
+    } catch (error) {
+      setMessage({
+        tone: "danger",
+        title: "Password not changed",
+        message: error instanceof Error ? error.message : "Could not update password.",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="rounded-md border border-cyan-300/25 bg-[#071a33] p-4 shadow-[0_20px_70px_rgba(0,0,0,0.28)]">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Change Production Password</h2>
+          <p className="mt-1 text-sm text-slate-300">This updates your Supabase Auth password only. CI4U does not store staff passwords.</p>
+        </div>
+        <button className="secondary-button" type="button" onClick={onClose}>
+          <X className="h-4 w-4" />
+          Close
+        </button>
+      </div>
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <Field label="New Password">
+          <input className="field" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+        </Field>
+        <Field label="Confirm New Password">
+          <input
+            className="field"
+            type="password"
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                void submitPasswordChange();
+              }
+            }}
+          />
+        </Field>
+      </div>
+      {message ? <Notice tone={message.tone} title={message.title} message={message.message} /> : null}
+      <button className="primary-button mt-4" type="button" disabled={busy || !canSubmit} onClick={() => void submitPasswordChange()}>
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LockKeyhole className="h-4 w-4" />}
+        Update Password
+      </button>
+    </section>
+  );
+}
+
 function BrandBlock() {
   return (
     <div className="flex items-center gap-3 px-2 pb-5">
@@ -798,7 +942,15 @@ function BrandBlock() {
   );
 }
 
-function DevScopeCard({ session, onLogout }: { session: DevSession; onLogout: () => void }) {
+function DevScopeCard({
+  session,
+  onLogout,
+  onOpenPasswordPanel,
+}: {
+  session: DevSession;
+  onLogout: () => void;
+  onOpenPasswordPanel: () => void;
+}) {
   return (
     <section className="rounded-md border border-cyan-300/20 bg-cyan-300/10 p-4">
       <div className="flex items-center gap-3">
@@ -813,9 +965,16 @@ function DevScopeCard({ session, onLogout }: { session: DevSession; onLogout: ()
       <div className="mt-4 rounded-md border border-cyan-300/20 bg-black/20 px-3 py-2 text-xs text-cyan-100">
         {session.authMode === "supabase" ? "PRODUCTION ACCESS" : "DEV DATA ONLY"}
       </div>
-      <button className="mt-3 text-sm font-semibold text-slate-200 hover:text-white" onClick={onLogout}>
-        {session.authMode === "supabase" ? "Logout" : "Switch dev user"}
-      </button>
+      <div className="mt-3 flex flex-wrap gap-3 text-sm font-semibold">
+        {session.authMode === "supabase" ? (
+          <button className="text-cyan-100 hover:text-white" type="button" onClick={onOpenPasswordPanel}>
+            Change password
+          </button>
+        ) : null}
+        <button className="text-slate-200 hover:text-white" type="button" onClick={onLogout}>
+          {session.authMode === "supabase" ? "Logout" : "Switch dev user"}
+        </button>
+      </div>
     </section>
   );
 }
@@ -859,6 +1018,7 @@ function TopBar({
   onToggleSidebar,
   onToggleNotifications,
   onMarkNotificationRead,
+  onOpenPasswordPanel,
   onLogout,
 }: {
   session: DevSession;
@@ -869,6 +1029,7 @@ function TopBar({
   onToggleSidebar: () => void;
   onToggleNotifications: () => void;
   onMarkNotificationRead: (notificationId: string) => void;
+  onOpenPasswordPanel: () => void;
   onLogout: () => void;
 }) {
   const unreadCount = notifications.filter((notification) => !notification.read).length;
@@ -934,6 +1095,11 @@ function TopBar({
             </div>
           ) : null}
         </div>
+        {session.authMode === "supabase" ? (
+          <button className="hidden rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold hover:bg-white/10 sm:block" type="button" onClick={onOpenPasswordPanel}>
+            Change password
+          </button>
+        ) : null}
         <button className="rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold" onClick={onLogout}>
           Logout
         </button>
