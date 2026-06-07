@@ -1682,6 +1682,7 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
   const permissionOptions = accessOptions?.permissions ?? allPermissionCodes.map((value) => ({ value, label: formatEnum(value) }));
   const canDeactivateUsers = hasPermission(session, "DELETE_USERS");
   const canViewMetrics = hasPermission(session, "SUPERVISOR");
+  const sessionAuthorityStage = session.authorityStage ?? defaultStageForRole(session.role);
 
   function changeRole(nextRole: DevRole) {
     setRole(nextRole);
@@ -1893,43 +1894,50 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
               </tr>
             </thead>
             <tbody className="divide-y divide-white/10">
-              {users.map((user) => (
-                <tr key={user.id} className="hover:bg-white/[0.03]">
-                  <td className="px-4 py-3">
-                    <div className="font-semibold">{user.name}</div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {user.postTitle ? <span className="rounded bg-cyan-400/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-cyan-100">{user.postTitle}</span> : null}
-                      {user.roleTags.map((tag) => (
-                        <span key={tag} className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-200">
-                          {tag.replaceAll("_", " ")}
-                        </span>
-                      ))}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-slate-300">{user.email ?? "-"}</td>
-                  <td className="px-4 py-3 text-cyan-200">{formatEnum(user.role)}</td>
-                  <td className="px-4 py-3">{user.authorityStage}</td>
-                  <td className="max-w-[280px] px-4 py-3 text-xs text-slate-300">{user.permissions.map(formatEnum).join(", ") || "-"}</td>
-                  <td className="px-4 py-3">{formatEnum(user.status)}</td>
-                  <td className="px-4 py-3 text-slate-300">{formatEnum(user.authProvisioning)}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex flex-wrap gap-2">
-                      {canViewMetrics ? (
-                        <button className="secondary-button py-1 text-xs" type="button" disabled={loadingMetricsUserId === user.id} onClick={() => void openMetrics(user)}>
-                          {loadingMetricsUserId === user.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <InfoIcon className="h-3.5 w-3.5" />}
-                          Metrics
-                        </button>
-                      ) : null}
-                      {canDeactivateUsers && user.status !== "DEACTIVATED" ? (
-                        <button className="secondary-button py-1 text-xs text-red-100" type="button" disabled={deletingUserId === user.id} onClick={() => void deactivateUser(user)}>
-                          {deletingUserId === user.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
-                          Deactivate
-                        </button>
-                      ) : null}
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {users.map((user) => {
+                const canActOnStage = user.authorityStage <= sessionAuthorityStage;
+                const canInspectUser = canViewMetrics && (user.id === session.userId || canActOnStage);
+                const canDeactivateUser = canDeactivateUsers && user.id !== session.userId && canActOnStage && user.status !== "DEACTIVATED";
+
+                return (
+                  <tr key={user.id} className="hover:bg-white/[0.03]">
+                    <td className="px-4 py-3">
+                      <div className="font-semibold">{user.name}</div>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {user.postTitle ? <span className="rounded bg-cyan-400/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-cyan-100">{user.postTitle}</span> : null}
+                        {user.roleTags.map((tag) => (
+                          <span key={tag} className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-200">
+                            {tag.replaceAll("_", " ")}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-slate-300">{user.email ?? "-"}</td>
+                    <td className="px-4 py-3 text-cyan-200">{formatEnum(user.role)}</td>
+                    <td className="px-4 py-3">{user.authorityStage}</td>
+                    <td className="max-w-[280px] px-4 py-3 text-xs text-slate-300">{user.permissions.map(formatEnum).join(", ") || "-"}</td>
+                    <td className="px-4 py-3">{formatEnum(user.status)}</td>
+                    <td className="px-4 py-3 text-slate-300">{formatEnum(user.authProvisioning)}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-2">
+                        {canInspectUser ? (
+                          <button className="secondary-button py-1 text-xs" type="button" disabled={loadingMetricsUserId === user.id} onClick={() => void openMetrics(user)}>
+                            {loadingMetricsUserId === user.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <InfoIcon className="h-3.5 w-3.5" />}
+                            Metrics
+                          </button>
+                        ) : null}
+                        {canDeactivateUser ? (
+                          <button className="secondary-button py-1 text-xs text-red-100" type="button" disabled={deletingUserId === user.id} onClick={() => void deactivateUser(user)}>
+                            {deletingUserId === user.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                            Deactivate
+                          </button>
+                        ) : null}
+                        {!canInspectUser && !canDeactivateUser ? <span className="text-xs text-slate-500">Above your authority</span> : null}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
               {!users.length ? (
                 <tr>
                   <td className="px-4 py-8 text-center text-slate-400" colSpan={8}>
