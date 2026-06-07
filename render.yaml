@@ -12,19 +12,19 @@ services:
       - key: CI4U_REPOSITORY
         value: prisma
       - key: CI4U_DATA_SCOPE
-        sync: false
+        value: production
       - key: CI4U_AUTH_MODE
-        sync: false
+        value: supabase
       - key: CI4U_ALLOW_DEV_AUTH_IN_PRODUCTION
-        sync: false
+        value: "false"
       - key: CI4U_WEB_ORIGINS
-        sync: false
+        value: https://ci4u-brains.vercel.app,https://ci4u-brains-mohd927292s-projects.vercel.app,https://ci4u-brains-git-main-mohd927292s-projects.vercel.app
       - key: DATABASE_URL
         sync: false
       - key: CI4U_SUPABASE_URL
-        sync: false
+        value: https://klvtjuejpogylqkkdkqx.supabase.co
       - key: CI4U_SUPABASE_PUBLISHABLE_KEY
-        sync: false
+        value: sb_publishable_mnlSoTHUbDpR5DD0afZHeg_9YhkeuFE
       - key: CI4U_SUPABASE_ANON_KEY
         sync: false
       - key: CI4U_SUPABASE_SERVICE_ROLE_KEY
@@ -32,7 +32,7 @@ services:
       - key: CI4U_FOUNDER_EMAIL
         value: syedci4u@gmail.com
       - key: CI4U_AUTH_INVITE_REDIRECT_URL
-        sync: false
+        value: https://ci4u-brains.vercel.app
       - key: CI4U_AUTH_JWKS_URL
         sync: false
       - key: CI4U_AUTH_ISSUER
