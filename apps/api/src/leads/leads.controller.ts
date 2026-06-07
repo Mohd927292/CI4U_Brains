@@ -1,12 +1,17 @@
 import { BadRequestException, Body, Controller, Get, Inject, NotFoundException, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { ZodError } from "zod";
-import { LeadIntakeService, LeadValidationError, type CreateLeadInput, type SaveCallOutcomeInput } from "./lead-intake.service";
+import type { SessionUser } from "../auth/auth.service";
+import { AuthService, AuthWorkflowError } from "../auth/auth.service";
+import { LeadIntakeService, LeadValidationError, type CreateLeadInput, type SaveCallOutcomeInput, type TransferLeadInput } from "./lead-intake.service";
 import { type ImportPreviewRowInput, type LeadQueue } from "./lead.types";
 
 @Controller("leads")
 export class LeadsController {
-  constructor(@Inject(LeadIntakeService) private readonly leadIntakeService: LeadIntakeService) {}
+  constructor(
+    @Inject(LeadIntakeService) private readonly leadIntakeService: LeadIntakeService,
+    @Inject(AuthService) private readonly authService: AuthService,
+  ) {}
 
   @Get("raw")
   listRawLeads(@Req() req: Request) {
@@ -47,7 +52,13 @@ export class LeadsController {
   @Post("manual")
   async createManualLead(@Req() req: Request, @Body() body: CreateLeadInput) {
     try {
-      return await this.leadIntakeService.createManualLead(requireDataScope(req), body);
+      const actor = await this.requireActor(req);
+      this.authService.assertPermission(actor, "ADD_RAW_LEADS");
+      return await this.leadIntakeService.createManualLead(actor.dataScope, {
+        ...body,
+        createdById: actor.id,
+        assignedToId: body.assignedToId ?? actor.id,
+      });
     } catch (error) {
       throw this.toBadRequest(error);
     }
@@ -56,7 +67,9 @@ export class LeadsController {
   @Post(":leadId/call-outcome")
   async saveCallOutcome(@Req() req: Request, @Param("leadId") leadId: string, @Body() body: SaveCallOutcomeInput) {
     try {
-      return await this.leadIntakeService.saveCallOutcome(requireDataScope(req), leadId, body);
+      const actor = await this.requireActor(req);
+      this.authService.assertPermission(actor, "WORK_ON_LEADS");
+      return await this.leadIntakeService.saveCallOutcome(actor.dataScope, leadId, body, actor.id);
     } catch (error) {
       throw this.toBadRequest(error);
     }
@@ -65,7 +78,20 @@ export class LeadsController {
   @Post(":leadId/call-outcome/ack")
   async saveCallOutcomeAck(@Req() req: Request, @Param("leadId") leadId: string, @Body() body: SaveCallOutcomeInput) {
     try {
-      return await this.leadIntakeService.saveCallOutcomeAck(requireDataScope(req), leadId, body);
+      const actor = await this.requireActor(req);
+      this.authService.assertPermission(actor, "WORK_ON_LEADS");
+      return await this.leadIntakeService.saveCallOutcomeAck(actor.dataScope, leadId, body, actor.id);
+    } catch (error) {
+      throw this.toBadRequest(error);
+    }
+  }
+
+  @Post(":leadId/transfer")
+  async transferLead(@Req() req: Request, @Param("leadId") leadId: string, @Body() body: TransferLeadInput) {
+    try {
+      const actor = await this.requireActor(req);
+      this.authService.assertPermission(actor, "TRANSFER_LEADS");
+      return await this.leadIntakeService.transferLead(actor.dataScope, leadId, body, actor.id);
     } catch (error) {
       throw this.toBadRequest(error);
     }
@@ -80,7 +106,13 @@ export class LeadsController {
       });
     }
 
-    return this.leadIntakeService.previewImportRows(requireDataScope(req), body.rows);
+    try {
+      const actor = await this.requireActor(req);
+      this.authService.assertPermission(actor, "ADD_RAW_LEADS");
+      return this.leadIntakeService.previewImportRows(actor.dataScope, body.rows);
+    } catch (error) {
+      throw this.toBadRequest(error);
+    }
   }
 
   @Post("import/commit")
@@ -92,10 +124,27 @@ export class LeadsController {
       });
     }
 
-    return this.leadIntakeService.commitImportRows(requireDataScope(req), body.rows, body.source ?? "IMPORT");
+    try {
+      const actor = await this.requireActor(req);
+      this.authService.assertPermission(actor, "ADD_RAW_LEADS");
+      return this.leadIntakeService.commitImportRows(actor.dataScope, body.rows, body.source ?? "IMPORT", actor.id);
+    } catch (error) {
+      throw this.toBadRequest(error);
+    }
+  }
+
+  private requireActor(req: Request): Promise<SessionUser> {
+    return this.authService.getCurrentUser(requireUser(req));
   }
 
   private toBadRequest(error: unknown): BadRequestException {
+    if (error instanceof AuthWorkflowError) {
+      return new BadRequestException({
+        code: error.code,
+        message: error.message,
+      });
+    }
+
     if (error instanceof LeadValidationError) {
       return new BadRequestException({
         code: error.code,
@@ -112,6 +161,17 @@ export class LeadsController {
 
     throw error;
   }
+}
+
+function requireUser(req: Request) {
+  if (!req.user?.dataScope) {
+    throw new BadRequestException({
+      code: "AUTH_REQUIRED",
+      message: "Authenticated CI4U user is required.",
+    });
+  }
+
+  return req.user;
 }
 
 function requireDataScope(req: Request) {

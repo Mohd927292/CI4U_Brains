@@ -70,7 +70,8 @@ export type LeadActivityType =
   | "WHATSAPP_GENERATED"
   | "WHATSAPP_SENT_MANUAL"
   | "NOTE_ADDED"
-  | "WON_MARKED";
+  | "WON_MARKED"
+  | "LEAD_TRANSFERRED";
 
 export type ImportPreviewStatus =
   | "NEW_VALID"
@@ -276,6 +277,7 @@ export type CreateLeadRecordInput = {
 export type UpdateLeadOutcomeRecordInput = {
   dataScope: DataScope;
   leadId: string;
+  actorId: string | null;
   currentStage: LeadStage;
   currentIntent: LeadIntent;
   priority: LeadPriority;
@@ -292,6 +294,16 @@ export type UpdateLeadOutcomeRecordInput = {
   wonDetails: PersistedWonDetailsInput | null;
   activityType: LeadActivityType;
   activitySummary: string;
+  now: Date;
+};
+
+export type TransferLeadRecordInput = {
+  dataScope: DataScope;
+  leadId: string;
+  fromUserId: string;
+  toUserId: string;
+  reason: string;
+  followUpAt: Date;
   now: Date;
 };
 

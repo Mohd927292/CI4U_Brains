@@ -32,6 +32,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   apiGet,
   apiPost,
+  apiDelete,
+  type AccessOptions,
+  type AssignableUser,
   type ChecklistItem,
   type CreateManagedUserInput,
   type CreateVendorInput,
@@ -49,10 +52,13 @@ import {
   type LeadSaveAck,
   type ManagedUser,
   type NotificationSummary,
+  type PermissionCode,
   type QueueCounts,
   type RawLeadListItem,
   type SaveCallOutcomeInput,
   type SessionUser,
+  type TransferLeadInput,
+  type UserMetrics,
   type VendorSummary,
   type VendorTeamMemberInput,
   type WonLeadOperationDetail,
@@ -132,7 +138,99 @@ function forgetBackgroundSave(leadId: string) {
 }
 
 function canManageUsers(session: DevSession): boolean {
-  return ["FOUNDER", "SUPER_ADMIN", "ADMIN", "MANAGEMENT"].includes(session.role);
+  return hasPermission(session, "ADD_USERS") || hasPermission(session, "DELETE_USERS") || hasPermission(session, "SUPERVISOR");
+}
+
+function hasPermission(session: DevSession | SessionUser, permission: PermissionCode): boolean {
+  if (session.role === "FOUNDER" || session.role === "SUPER_ADMIN") {
+    return true;
+  }
+
+  return Boolean(session.permissions?.includes(permission));
+}
+
+const allPermissionCodes: PermissionCode[] = ["ADD_RAW_LEADS", "WORK_ON_LEADS", "TRANSFER_LEADS", "SUPERVISOR", "ADD_USERS", "DELETE_USERS"];
+
+function defaultPostTitleForRole(role: DevRole): string {
+  if (role === "FOUNDER") {
+    return "BDM";
+  }
+
+  if (role === "SUPER_ADMIN") {
+    return "Co-Founder / CTO";
+  }
+
+  return formatEnum(role);
+}
+
+function defaultTagsForRole(role: DevRole): string[] {
+  if (role === "FOUNDER") {
+    return ["BDM"];
+  }
+
+  if (role === "SUPER_ADMIN") {
+    return ["CO_FOUNDER", "CTO"];
+  }
+
+  return [];
+}
+
+function defaultStageForRole(role: DevRole): number {
+  if (role === "SUPER_ADMIN") {
+    return 100;
+  }
+
+  if (role === "FOUNDER") {
+    return 90;
+  }
+
+  if (role === "ADMIN" || role === "MANAGEMENT") {
+    return 80;
+  }
+
+  if (role.endsWith("_HEAD")) {
+    return 70;
+  }
+
+  if (role.includes("MANAGER")) {
+    return 60;
+  }
+
+  if (role === "VIEWER") {
+    return 10;
+  }
+
+  return 30;
+}
+
+function defaultPermissionsForRole(role: DevRole): PermissionCode[] {
+  if (role === "FOUNDER" || role === "SUPER_ADMIN") {
+    return allPermissionCodes;
+  }
+
+  if (role === "ADMIN" || role === "MANAGEMENT") {
+    return ["ADD_RAW_LEADS", "WORK_ON_LEADS", "TRANSFER_LEADS", "SUPERVISOR", "ADD_USERS"];
+  }
+
+  if (role.endsWith("_HEAD") || role.includes("MANAGER")) {
+    return ["ADD_RAW_LEADS", "WORK_ON_LEADS", "TRANSFER_LEADS", "SUPERVISOR"];
+  }
+
+  if (role === "VIEWER") {
+    return [];
+  }
+
+  return role === "ACCOUNTS_EXECUTIVE" ? ["WORK_ON_LEADS"] : ["ADD_RAW_LEADS", "WORK_ON_LEADS", "TRANSFER_LEADS"];
+}
+
+function withSessionAccessDefaults(session: DevSession): DevSession {
+  return {
+    ...session,
+    postTitle: session.postTitle ?? defaultPostTitleForRole(session.role),
+    roleTags: session.roleTags ?? defaultTagsForRole(session.role),
+    permissions: session.permissions ?? defaultPermissionsForRole(session.role),
+    authorityStage: session.authorityStage ?? defaultStageForRole(session.role),
+  };
 }
 
 export function Ci4uBrainsApp() {
@@ -244,7 +342,7 @@ export function Ci4uBrainsApp() {
     const saved = window.localStorage.getItem(sessionStorageKey);
 
     if (!isProductionAuthEnabled()) {
-      setSession(saved ? (JSON.parse(saved) as DevSession) : null);
+      setSession(saved ? withSessionAccessDefaults(JSON.parse(saved) as DevSession) : null);
       setSessionReady(true);
       return;
     }
@@ -382,13 +480,13 @@ export function Ci4uBrainsApp() {
   }
 
   function login(user: (typeof devUsers)[number]) {
-    const nextSession: DevSession = {
+    const nextSession: DevSession = withSessionAccessDefaults({
       userId: `dev-${user.role.toLowerCase()}`,
       name: user.name,
       role: user.role,
       dataScope: "development",
       authMode: "dev",
-    };
+    });
     window.localStorage.setItem(sessionStorageKey, JSON.stringify(nextSession));
     setSession(nextSession);
     void loadQueue("RAW", nextSession, { preferCache: true });
@@ -432,6 +530,10 @@ export function Ci4uBrainsApp() {
       userId: user.id,
       name: user.name,
       role: user.role,
+      postTitle: user.postTitle,
+      roleTags: user.roleTags,
+      permissions: user.permissions,
+      authorityStage: user.authorityStage,
       dataScope: user.dataScope,
       email: user.email,
       accessToken,
@@ -637,7 +739,7 @@ export function Ci4uBrainsApp() {
   return (
     <main className="min-h-screen bg-[#031023] text-white">
       <div className="flex min-h-screen">
-        <aside className={`${sidebarOpen ? "lg:block" : "lg:hidden"} hidden w-[318px] shrink-0 border-r border-white/10 bg-[#020b19] px-4 py-5`}>
+        <aside className={`${sidebarOpen ? "fixed inset-y-0 left-0 z-40 block lg:static" : "hidden"} w-[318px] shrink-0 overflow-y-auto border-r border-white/10 bg-[#020b19] px-4 py-5`}>
           <BrandBlock />
           <DevScopeCard session={session} onLogout={logout} onOpenPasswordPanel={() => setPasswordPanelOpen(true)} />
           <nav className="mt-4 space-y-2">
@@ -695,7 +797,19 @@ export function Ci4uBrainsApp() {
             {activeView === "vendors" ? <VendorsWorkspace session={session} /> : null}
             {activeView === "users" ? <UserManagementWorkspace session={session} onUsersChanged={() => void loadNotifications(session)} /> : null}
             {activeView === "lead-detail" && selectedLead ? (
-              <LeadDetailWorkspaceV2 key={selectedLead.id} session={session} lead={selectedLead} onSaveRequested={handleLeadUpdateRequested} onBack={() => setActiveView("raw-leads")} />
+              <LeadDetailWorkspaceV2
+                key={selectedLead.id}
+                session={session}
+                lead={selectedLead}
+                onSaveRequested={handleLeadUpdateRequested}
+                onLeadTransferred={(updatedLead) => {
+                  leadDetailCache.current.set(updatedLead.id, updatedLead);
+                  setSelectedLead(updatedLead);
+                  void loadQueue(activeQueue, session, { preferCache: false, refreshCounts: true });
+                  void loadNotifications(session);
+                }}
+                onBack={() => setActiveView("raw-leads")}
+              />
             ) : null}
           </div>
         </section>
@@ -960,6 +1074,14 @@ function DevScopeCard({
         <div className="min-w-0">
           <div className="truncate font-semibold">{session.name}</div>
           <div className="text-xs font-semibold uppercase text-cyan-200">{session.role.replaceAll("_", " ")}</div>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {session.postTitle ? <span className="rounded border border-cyan-300/20 bg-cyan-400/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-cyan-100">{session.postTitle}</span> : null}
+            {(session.roleTags ?? []).map((tag) => (
+              <span key={tag} className="rounded border border-white/10 bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-200">
+                {tag.replaceAll("_", " ")}
+              </span>
+            ))}
+          </div>
         </div>
       </div>
       <div className="mt-4 rounded-md border border-cyan-300/20 bg-black/20 px-3 py-2 text-xs text-cyan-100">
@@ -1508,12 +1630,20 @@ const staffRoleOptions: Array<{ value: DevRole; label: string }> = [
 
 function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSession; onUsersChanged: () => void }) {
   const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [accessOptions, setAccessOptions] = useState<AccessOptions | null>(null);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<DevRole>("SALES_EXECUTIVE");
+  const [postTitle, setPostTitle] = useState(defaultPostTitleForRole("SALES_EXECUTIVE"));
+  const [roleTagsText, setRoleTagsText] = useState(defaultTagsForRole("SALES_EXECUTIVE").join(", "));
+  const [selectedPermissions, setSelectedPermissions] = useState<PermissionCode[]>(defaultPermissionsForRole("SALES_EXECUTIVE"));
+  const [authorityStage, setAuthorityStage] = useState(String(defaultStageForRole("SALES_EXECUTIVE")));
   const [temporaryPassword, setTemporaryPassword] = useState("");
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [savingUser, setSavingUser] = useState(false);
+  const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
+  const [metrics, setMetrics] = useState<UserMetrics | null>(null);
+  const [loadingMetricsUserId, setLoadingMetricsUserId] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: "success" | "warning" | "danger"; title: string; message: string } | null>(null);
 
   const loadUsers = useCallback(async () => {
@@ -1521,7 +1651,9 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
     setMessage(null);
 
     try {
-      setUsers(await apiGet<ManagedUser[]>("/auth/users", session));
+      const [loadedUsers, loadedOptions] = await Promise.all([apiGet<ManagedUser[]>("/auth/users", session), apiGet<AccessOptions>("/auth/access-options", session)]);
+      setUsers(loadedUsers);
+      setAccessOptions(loadedOptions);
     } catch (error) {
       setMessage({ tone: "danger", title: "Users blocked", message: error instanceof Error ? error.message : "Could not load users." });
     } finally {
@@ -1537,6 +1669,35 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
     return () => window.clearTimeout(timer);
   }, [loadUsers]);
 
+  const roleOptions =
+    accessOptions?.roles ??
+    staffRoleOptions.map((option) => ({
+      value: option.value,
+      label: option.label,
+      defaultPostTitle: defaultPostTitleForRole(option.value),
+      defaultRoleTags: defaultTagsForRole(option.value),
+      defaultAuthorityStage: defaultStageForRole(option.value),
+      defaultPermissions: defaultPermissionsForRole(option.value),
+    }));
+  const permissionOptions = accessOptions?.permissions ?? allPermissionCodes.map((value) => ({ value, label: formatEnum(value) }));
+  const canDeactivateUsers = hasPermission(session, "DELETE_USERS");
+  const canViewMetrics = hasPermission(session, "SUPERVISOR");
+
+  function changeRole(nextRole: DevRole) {
+    setRole(nextRole);
+    const option = roleOptions.find((entry) => entry.value === nextRole);
+    setPostTitle(option?.defaultPostTitle ?? defaultPostTitleForRole(nextRole));
+    setRoleTagsText((option?.defaultRoleTags ?? defaultTagsForRole(nextRole)).join(", "));
+    setSelectedPermissions(option?.defaultPermissions ?? defaultPermissionsForRole(nextRole));
+    setAuthorityStage(String(option?.defaultAuthorityStage ?? defaultStageForRole(nextRole)));
+  }
+
+  function togglePermission(permission: PermissionCode) {
+    setSelectedPermissions((current) =>
+      current.includes(permission) ? current.filter((entry) => entry !== permission) : [...current, permission],
+    );
+  }
+
   async function addUser() {
     setSavingUser(true);
     setMessage(null);
@@ -1545,6 +1706,13 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
       name,
       email,
       role,
+      postTitle,
+      roleTags: roleTagsText
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+      permissions: selectedPermissions,
+      authorityStage: Number(authorityStage || defaultStageForRole(role)),
       ...(temporaryPassword ? { temporaryPassword } : {}),
     };
 
@@ -1554,19 +1722,51 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
       setName("");
       setEmail("");
       setTemporaryPassword("");
+      changeRole("SALES_EXECUTIVE");
       onUsersChanged();
       setMessage({
         tone: saved.authProvisioning === "LOCAL_ONLY" ? "warning" : "success",
         title: "User access saved",
         message:
           saved.authProvisioning === "LOCAL_ONLY"
-            ? "User was saved in CI4U, but Supabase Auth provisioning needs CI4U_SUPABASE_SERVICE_ROLE_KEY on the backend."
-            : `${saved.email} can use CI4U as ${formatEnum(saved.role)}.`,
+            ? "User was saved in CI4U only. Invite email was not sent because CI4U_SUPABASE_SERVICE_ROLE_KEY is missing on the API server."
+            : saved.authProvisioning === "SUPABASE_INVITED"
+              ? `Invite email sent to ${saved.email}.`
+              : `${saved.email} can use CI4U as ${formatEnum(saved.role)}.`,
       });
     } catch (error) {
       setMessage({ tone: "danger", title: "User not saved", message: error instanceof Error ? error.message : "Could not save user." });
     } finally {
       setSavingUser(false);
+    }
+  }
+
+  async function deactivateUser(user: ManagedUser) {
+    setDeletingUserId(user.id);
+    setMessage(null);
+
+    try {
+      const updated = await apiDelete<ManagedUser>(`/auth/users/${user.id}`, session);
+      setUsers((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
+      setMessage({ tone: "success", title: "User deactivated", message: `${user.name} can no longer access CI4U.` });
+      onUsersChanged();
+    } catch (error) {
+      setMessage({ tone: "danger", title: "User not deactivated", message: error instanceof Error ? error.message : "Could not deactivate user." });
+    } finally {
+      setDeletingUserId(null);
+    }
+  }
+
+  async function openMetrics(user: ManagedUser) {
+    setLoadingMetricsUserId(user.id);
+    setMessage(null);
+
+    try {
+      setMetrics(await apiGet<UserMetrics>(`/auth/users/${user.id}/metrics`, session));
+    } catch (error) {
+      setMessage({ tone: "danger", title: "Metrics blocked", message: error instanceof Error ? error.message : "Could not load staff metrics." });
+    } finally {
+      setLoadingMetricsUserId(null);
     }
   }
 
@@ -1583,16 +1783,47 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
       <Notice
         tone="warning"
         title="Production access control"
-        message="Only create real staff accounts here. Roles control what the API will allow; do not share founder access."
+        message="Only create real staff accounts here. CI4U database permissions and authority stage control what the API will allow; Supabase metadata is not the source of truth."
       />
       {message ? <Notice tone={message.tone} title={message.title} message={message.message} /> : null}
+      {metrics ? (
+        <section className="mb-4 rounded-md border border-cyan-300/20 bg-cyan-400/10 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="font-semibold">{metrics.userName} work metrics</h3>
+              <p className="mt-1 text-sm text-cyan-100">
+                {metrics.postTitle ?? formatEnum(metrics.role)} · Stage {metrics.authorityStage}
+              </p>
+            </div>
+            <button className="icon-button" type="button" onClick={() => setMetrics(null)}>
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              ["Leads added", metrics.leadsAdded],
+              ["Interacted", metrics.leadsInteracted],
+              ["Warm", metrics.warmLeads],
+              ["Hot", metrics.hotLeads],
+              ["Won", metrics.wonLeads],
+              ["Assisted hot", metrics.leadsAssistedHot],
+              ["Assisted won", metrics.leadsAssistedWon],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-md border border-white/10 bg-black/20 p-3">
+                <div className="text-xs uppercase text-slate-400">{label}</div>
+                <div className="mt-1 text-2xl font-semibold">{value}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="mt-4 rounded-md border border-white/10 bg-white/[0.03] p-4">
         <div className="mb-4 flex items-start gap-3">
           <UserPlus className="mt-0.5 h-5 w-5 text-cyan-200" />
           <div>
             <h3 className="font-semibold">Add Staff ID</h3>
-            <p className="mt-1 text-sm text-slate-300">Temporary password is optional. Without it, the backend will invite the user if Supabase service role is configured.</p>
+            <p className="mt-1 text-sm text-slate-300">Leave password empty to send a Supabase invite email when the API service-role key is configured.</p>
           </div>
         </div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -1603,17 +1834,41 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
             <input className="field" type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
           </Field>
           <Field label="Post / Role">
-            <select className="field" value={role} onChange={(event) => setRole(event.target.value as DevRole)}>
-              {staffRoleOptions.map((option) => (
+            <select className="field" value={role} onChange={(event) => changeRole(event.target.value as DevRole)}>
+              {roleOptions.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
             </select>
           </Field>
+          <Field label="Post Title">
+            <input className="field" value={postTitle} onChange={(event) => setPostTitle(event.target.value)} placeholder="BDM, Sales Executive, CTO..." />
+          </Field>
+          <Field label="Role Tags">
+            <input className="field" value={roleTagsText} onChange={(event) => setRoleTagsText(event.target.value)} placeholder="BDM, CTO" />
+          </Field>
+          <Field label="Authority Stage">
+            <input className="field" type="number" min={1} max={100} value={authorityStage} onChange={(event) => setAuthorityStage(event.target.value)} />
+          </Field>
           <Field label="Temporary Password">
             <input className="field" type="password" value={temporaryPassword} onChange={(event) => setTemporaryPassword(event.target.value)} placeholder="Min 8 chars, optional" />
           </Field>
+        </div>
+        <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3">
+          <div className="text-xs font-semibold uppercase text-slate-400">Permission checklist</div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {permissionOptions.map((permission) => (
+              <label key={permission.value} className="flex items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selectedPermissions.includes(permission.value)}
+                  onChange={() => togglePermission(permission.value)}
+                />
+                <span>{permission.label}</span>
+              </label>
+            ))}
+          </div>
         </div>
         <button className="primary-button mt-4" type="button" disabled={savingUser || !name.trim() || !email.trim()} onClick={() => void addUser()}>
           {savingUser ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
@@ -1630,23 +1885,54 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
                 <th className="px-4 py-3">Name</th>
                 <th className="px-4 py-3">Email</th>
                 <th className="px-4 py-3">Role</th>
+                <th className="px-4 py-3">Stage</th>
+                <th className="px-4 py-3">Permissions</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">Provisioning</th>
+                <th className="px-4 py-3">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/10">
               {users.map((user) => (
                 <tr key={user.id} className="hover:bg-white/[0.03]">
-                  <td className="px-4 py-3 font-semibold">{user.name}</td>
+                  <td className="px-4 py-3">
+                    <div className="font-semibold">{user.name}</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {user.postTitle ? <span className="rounded bg-cyan-400/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-cyan-100">{user.postTitle}</span> : null}
+                      {user.roleTags.map((tag) => (
+                        <span key={tag} className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-200">
+                          {tag.replaceAll("_", " ")}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
                   <td className="px-4 py-3 text-slate-300">{user.email ?? "-"}</td>
                   <td className="px-4 py-3 text-cyan-200">{formatEnum(user.role)}</td>
+                  <td className="px-4 py-3">{user.authorityStage}</td>
+                  <td className="max-w-[280px] px-4 py-3 text-xs text-slate-300">{user.permissions.map(formatEnum).join(", ") || "-"}</td>
                   <td className="px-4 py-3">{formatEnum(user.status)}</td>
                   <td className="px-4 py-3 text-slate-300">{formatEnum(user.authProvisioning)}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap gap-2">
+                      {canViewMetrics ? (
+                        <button className="secondary-button py-1 text-xs" type="button" disabled={loadingMetricsUserId === user.id} onClick={() => void openMetrics(user)}>
+                          {loadingMetricsUserId === user.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <InfoIcon className="h-3.5 w-3.5" />}
+                          Metrics
+                        </button>
+                      ) : null}
+                      {canDeactivateUsers && user.status !== "DEACTIVATED" ? (
+                        <button className="secondary-button py-1 text-xs text-red-100" type="button" disabled={deletingUserId === user.id} onClick={() => void deactivateUser(user)}>
+                          {deletingUserId === user.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                          Deactivate
+                        </button>
+                      ) : null}
+                    </div>
+                  </td>
                 </tr>
               ))}
               {!users.length ? (
                 <tr>
-                  <td className="px-4 py-8 text-center text-slate-400" colSpan={5}>
+                  <td className="px-4 py-8 text-center text-slate-400" colSpan={8}>
                     No staff users found yet.
                   </td>
                 </tr>
@@ -2046,11 +2332,13 @@ function LeadDetailWorkspaceV2({
   session,
   lead,
   onSaveRequested,
+  onLeadTransferred,
   onBack,
 }: {
   session: DevSession;
   lead: LeadDetail;
   onSaveRequested: (lead: LeadDetail, payload: SaveCallOutcomeInput) => void;
+  onLeadTransferred: (lead: LeadDetail) => void;
   onBack: () => void;
 }) {
   const warmDefault = defaultLocalDateTime(30);
@@ -2086,6 +2374,13 @@ function LeadDetailWorkspaceV2({
   const [inspectedEvent, setInspectedEvent] = useState<LeadDetail["timeline"][number] | null>(null);
   const [notice, setNotice] = useState<{ tone: "success" | "warning" | "danger"; title: string; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
+  const [transferToUserId, setTransferToUserId] = useState("");
+  const [transferReason, setTransferReason] = useState("");
+  const [transferFollowUpDate, setTransferFollowUpDate] = useState(defaultLocalDateTime(0).date);
+  const [transferFollowUpTime, setTransferFollowUpTime] = useState(defaultLocalDateTime(0).time);
+  const [loadingAssignableUsers, setLoadingAssignableUsers] = useState(false);
+  const [transferBusy, setTransferBusy] = useState(false);
 
   const isFollowUp = lead.currentStage !== "RAW_UNTOUCHED" || lead.spokenCount > 0;
   const outcomeOptions = normalizeOutcomeOptions(isFollowUp ? lead.followUpOutcomeOptions : lead.firstCallOutcomeOptions, lead);
@@ -2100,6 +2395,27 @@ function LeadDetailWorkspaceV2({
   const needsSiteVisitSchedule = spokeSelected && hotIntent && followUpReason === "SITE_VISIT";
   const nextNotReceivingLabel = getNextNotReceivingLabel(lead);
   const isWonLead = lead.currentStage === "CAPTURED_WON";
+  const canTransferLead = hasPermission(session, "TRANSFER_LEADS");
+
+  useEffect(() => {
+    if (!canTransferLead) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      setLoadingAssignableUsers(true);
+      apiGet<AssignableUser[]>("/auth/assignable-users", session)
+        .then((users) => {
+          setAssignableUsers(users.filter((user) => user.id !== session.userId));
+        })
+        .catch((error) => {
+          setNotice({ tone: "danger", title: "Transfer users blocked", message: error instanceof Error ? error.message : "Could not load staff list." });
+        })
+        .finally(() => setLoadingAssignableUsers(false));
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [canTransferLead, session]);
 
   function handleOutcomeChange(value: string) {
     setCallOutcome(value);
@@ -2261,6 +2577,42 @@ function LeadDetailWorkspaceV2({
     }
   }
 
+  async function transferLead() {
+    if (!transferToUserId) {
+      setNotice({ tone: "danger", title: "Transfer blocked", message: "Select the staff member who should receive this lead." });
+      return;
+    }
+
+    if (!transferReason.trim()) {
+      setNotice({ tone: "danger", title: "Transfer blocked", message: "Write why this lead is being transferred." });
+      return;
+    }
+
+    setTransferBusy(true);
+    setNotice(null);
+
+    try {
+      const payload: TransferLeadInput = {
+        toUserId: transferToUserId,
+        reason: transferReason,
+        followUpAt: localDateTimeToIso(transferFollowUpDate, transferFollowUpTime),
+      };
+      const updated = await apiPost<LeadDetail>(`/leads/${lead.id}/transfer`, session, payload);
+      onLeadTransferred(updated);
+      const receiver = assignableUsers.find((user) => user.id === transferToUserId);
+      setTransferReason("");
+      setNotice({
+        tone: "success",
+        title: "Lead transferred",
+        message: `${lead.customerName} was assigned to ${receiver?.name ?? "selected staff"} and added to their follow-up queue.`,
+      });
+    } catch (error) {
+      setNotice({ tone: "danger", title: "Transfer failed", message: error instanceof Error ? error.message : "Could not transfer this lead." });
+    } finally {
+      setTransferBusy(false);
+    }
+  }
+
   return (
     <section className="space-y-5">
       <button className="secondary-button" onClick={onBack}>
@@ -2275,6 +2627,49 @@ function LeadDetailWorkspaceV2({
           <Info label="Next Follow-up" value={lead.nextFollowUpAt ? formatDateTime(lead.nextFollowUpAt) : "-"} />
         </div>
       </Panel>
+
+      {canTransferLead ? (
+        <Panel
+          title="Transfer Lead"
+          action={
+            loadingAssignableUsers ? (
+              <span className="inline-flex items-center gap-2 text-sm text-slate-300">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading staff
+              </span>
+            ) : null
+          }
+        >
+          <div className="grid gap-3 lg:grid-cols-[1fr_1.4fr_0.9fr_0.9fr_auto]">
+            <Field label="Send To">
+              <select className="field" value={transferToUserId} onChange={(event) => setTransferToUserId(event.target.value)}>
+                <option value="">Select staff</option>
+                {assignableUsers.map((user) => (
+                  <option key={user.id} value={user.id}>
+                    {user.name} - {user.postTitle ?? formatEnum(user.role)} - Stage {user.authorityStage}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Transfer Reason">
+              <input className="field" value={transferReason} onChange={(event) => setTransferReason(event.target.value)} placeholder="Needs senior follow-up, pricing approval..." />
+            </Field>
+            <Field label="Follow-up Date">
+              <input className="field" type="date" value={transferFollowUpDate} onChange={(event) => setTransferFollowUpDate(event.target.value)} />
+            </Field>
+            <Field label="Follow-up Time">
+              <input className="field" type="time" value={transferFollowUpTime} onChange={(event) => setTransferFollowUpTime(event.target.value)} />
+            </Field>
+            <div className="flex items-end">
+              <button className="primary-button w-full" type="button" disabled={transferBusy || !transferToUserId || !transferReason.trim()} onClick={() => void transferLead()}>
+                {transferBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                Transfer
+              </button>
+            </div>
+          </div>
+          <p className="mt-3 text-xs text-slate-400">The backend will reassign the lead, create the receiver follow-up, notify them, and write a transfer event in customer history.</p>
+        </Panel>
+      ) : null}
 
       {wonOpen ? (
         <WonDetailsPanel

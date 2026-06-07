@@ -94,6 +94,13 @@ const callOutcomeSchema = z.object({
 });
 
 export type SaveCallOutcomeInput = z.input<typeof callOutcomeSchema>;
+const transferLeadSchema = z.object({
+  toUserId: z.string().trim().min(1, "Transfer target is required."),
+  reason: z.string().trim().min(1, "Transfer reason is required."),
+  followUpAt: z.string().datetime().optional(),
+});
+
+export type TransferLeadInput = z.input<typeof transferLeadSchema>;
 type SaveMode = "detail" | "ack";
 type SaveCallOutcomeResult = LeadDetail | LeadSaveAck;
 
@@ -171,27 +178,43 @@ export class LeadIntakeService {
     return this.leadRepository.getLeadDetail(dataScope, leadId);
   }
 
-  async saveCallOutcome(dataScope: DataScope, leadId: string, input: SaveCallOutcomeInput): Promise<LeadDetail> {
+  async saveCallOutcome(dataScope: DataScope, leadId: string, input: SaveCallOutcomeInput, actorId: string | null = null): Promise<LeadDetail> {
     const lead = await this.getLeadDetail(dataScope, leadId);
 
     if (!lead) {
       throw new LeadValidationError("Lead was not found.", "LEAD_NOT_FOUND");
     }
 
-    return this.saveCallOutcomeForLead(lead, input, "detail") as Promise<LeadDetail>;
+    return this.saveCallOutcomeForLead(lead, input, "detail", actorId) as Promise<LeadDetail>;
   }
 
-  async saveCallOutcomeAck(dataScope: DataScope, leadId: string, input: SaveCallOutcomeInput): Promise<LeadSaveAck> {
+  async saveCallOutcomeAck(dataScope: DataScope, leadId: string, input: SaveCallOutcomeInput, actorId: string | null = null): Promise<LeadSaveAck> {
     const lead = await this.leadRepository.getLeadWorkflowState(dataScope, leadId);
 
     if (!lead) {
       throw new LeadValidationError("Lead was not found.", "LEAD_NOT_FOUND");
     }
 
-    return this.saveCallOutcomeForLead(lead, input, "ack") as Promise<LeadSaveAck>;
+    return this.saveCallOutcomeForLead(lead, input, "ack", actorId) as Promise<LeadSaveAck>;
   }
 
-  private async saveCallOutcomeForLead(lead: LeadWorkflowState, input: SaveCallOutcomeInput, mode: SaveMode): Promise<SaveCallOutcomeResult> {
+  async transferLead(dataScope: DataScope, leadId: string, input: TransferLeadInput, fromUserId: string): Promise<LeadDetail> {
+    const parsed = transferLeadSchema.parse(input);
+    const now = new Date();
+    const followUpAt = parsed.followUpAt ? parseRequiredDate(parsed.followUpAt, "Transfer follow-up date/time is invalid.") : now;
+
+    return this.leadRepository.transferLead({
+      dataScope,
+      leadId,
+      fromUserId,
+      toUserId: parsed.toUserId,
+      reason: parsed.reason,
+      followUpAt,
+      now,
+    });
+  }
+
+  private async saveCallOutcomeForLead(lead: LeadWorkflowState, input: SaveCallOutcomeInput, mode: SaveMode, actorId: string | null): Promise<SaveCallOutcomeResult> {
     const parsed = callOutcomeSchema.parse(input);
     const now = new Date();
 
@@ -200,6 +223,7 @@ export class LeadIntakeService {
       return this.persistOutcome({
         dataScope: lead.dataScope,
         leadId: lead.id,
+        actorId,
         currentStage: "NOT_INTERESTED",
         currentIntent: "UNKNOWN",
         priority: "LOW",
@@ -224,6 +248,7 @@ export class LeadIntakeService {
       return this.persistOutcome({
         dataScope: lead.dataScope,
         leadId: lead.id,
+        actorId,
         currentStage: "WRONG_NUMBER",
         currentIntent: "UNKNOWN",
         priority: "LOW",
@@ -245,14 +270,14 @@ export class LeadIntakeService {
     }
 
     if (parsed.callOutcome === "NOT_RECEIVING") {
-      return this.saveNotReceivingOutcome(lead, parsed, now, mode);
+      return this.saveNotReceivingOutcome(lead, parsed, now, mode, actorId);
     }
 
     if (parsed.callOutcome === "WARM") {
-      return this.saveWarmOutcome(lead, parsed, now, mode);
+      return this.saveWarmOutcome(lead, parsed, now, mode, actorId);
     }
 
-    return this.saveSpokenOutcome(lead, parsed, now, mode);
+    return this.saveSpokenOutcome(lead, parsed, now, mode, actorId);
   }
 
   async previewImportRows(dataScope: DataScope, rows: ImportPreviewRowInput[]): Promise<ImportPreviewResult> {
@@ -328,7 +353,7 @@ export class LeadIntakeService {
     };
   }
 
-  async commitImportRows(dataScope: DataScope, rows: ImportPreviewRowInput[], source = "IMPORT"): Promise<ImportCommitResult> {
+  async commitImportRows(dataScope: DataScope, rows: ImportPreviewRowInput[], source = "IMPORT", uploadedById: string | null = null): Promise<ImportCommitResult> {
     const preview = await this.previewImportRows(dataScope, rows);
     const created: ImportCommitResult["created"] = [];
     const skipped: ImportPreviewRow[] = [];
@@ -346,8 +371,8 @@ export class LeadIntakeService {
             businessName: row.businessName,
             phoneNormalized: row.normalizedPhone,
             source,
-            createdById: null,
-            assignedToId: null,
+            createdById: uploadedById,
+            assignedToId: uploadedById,
             now: new Date(),
           }),
         );
@@ -396,6 +421,7 @@ export class LeadIntakeService {
     parsed: z.infer<typeof callOutcomeSchema> & { callOutcome: CallOutcome },
     now: Date,
     mode: SaveMode,
+    actorId: string | null,
   ): Promise<SaveCallOutcomeResult> {
     const requestedIntent = requireIntent(parsed.leadIntent);
     const conversationSummary = requireText(parsed.conversationSummary, "Conversation summary is required when Spoke is selected.");
@@ -411,6 +437,7 @@ export class LeadIntakeService {
       return this.persistOutcome({
         dataScope: lead.dataScope,
         leadId: lead.id,
+        actorId,
         currentStage: "LOST",
         currentIntent: lead.currentIntent === "UNKNOWN" ? "WARM" : lead.currentIntent,
         priority: "LOW",
@@ -456,6 +483,7 @@ export class LeadIntakeService {
     return this.persistOutcome({
       dataScope: lead.dataScope,
       leadId: lead.id,
+      actorId,
       currentStage,
       currentIntent: followUpReason === "WON" ? leadIntent : leadIntent,
       priority,
@@ -481,6 +509,7 @@ export class LeadIntakeService {
     parsed: z.infer<typeof callOutcomeSchema>,
     now: Date,
     mode: SaveMode,
+    actorId: string | null,
   ): Promise<SaveCallOutcomeResult> {
     const nextFollowUpAt = parsed.followUpAt
       ? parseRequiredDate(parsed.followUpAt, "Warm nurture follow-up date/time is invalid.")
@@ -498,6 +527,7 @@ export class LeadIntakeService {
     return this.persistOutcome({
       dataScope: lead.dataScope,
       leadId: lead.id,
+      actorId,
       currentStage: "WARM",
       currentIntent: "WARM",
       priority: "MEDIUM",
@@ -523,6 +553,7 @@ export class LeadIntakeService {
     parsed: z.infer<typeof callOutcomeSchema>,
     now: Date,
     mode: SaveMode,
+    actorId: string | null,
   ): Promise<SaveCallOutcomeResult> {
     const nextCount = lead.notReceivingCount + 1;
     const shortSchedule = lead.currentIntent === "INSTALLATION" || lead.currentIntent === "REPAIR_SERVICE" || lead.currentStage === "CAPTURED_WON";
@@ -534,6 +565,7 @@ export class LeadIntakeService {
       return this.persistOutcome({
         dataScope: lead.dataScope,
         leadId: lead.id,
+        actorId,
         currentStage: "NOT_RECEIVING_FINAL",
         currentIntent: lead.currentIntent,
         priority: "LOW",
@@ -560,6 +592,7 @@ export class LeadIntakeService {
     return this.persistOutcome({
       dataScope: lead.dataScope,
       leadId: lead.id,
+      actorId,
       currentStage: "NOT_RECEIVING",
       currentIntent: lead.currentIntent,
       priority: lead.priority,

@@ -1,10 +1,8 @@
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Req } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Inject, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { ZodError } from "zod";
-import type { DataScope, RequestUser, UserRole } from "./auth.types";
+import type { RequestUser } from "./auth.types";
 import { AuthService, AuthWorkflowError, type CreateUserInput } from "./auth.service";
-
-const userAdminRoles: ReadonlySet<UserRole> = new Set(["FOUNDER", "SUPER_ADMIN", "ADMIN", "MANAGEMENT"]);
 
 @Controller("auth")
 export class AuthController {
@@ -12,23 +10,58 @@ export class AuthController {
 
   @Get("me")
   getMe(@Req() req: Request) {
-    return this.authService.getCurrentUser(requireUser(req));
+    try {
+      return this.authService.getCurrentUser(requireUser(req));
+    } catch (error) {
+      throw toBadRequest(error);
+    }
+  }
+
+  @Get("access-options")
+  getAccessOptions() {
+    return this.authService.getAccessOptions();
   }
 
   @Get("users")
   listUsers(@Req() req: Request) {
     const user = requireUser(req);
-    requireRole(user, userAdminRoles);
-    return this.authService.listUsers(user.dataScope);
+    return this.authService.listUsers(user.dataScope, user);
+  }
+
+  @Get("assignable-users")
+  listAssignableUsers(@Req() req: Request) {
+    const user = requireUser(req);
+    return this.authService.listAssignableUsers(user.dataScope, user);
+  }
+
+  @Get("users/:userId/metrics")
+  async getUserMetrics(@Req() req: Request, @Param("userId") userId: string) {
+    const user = requireUser(req);
+
+    try {
+      return await this.authService.getUserMetrics(user.dataScope, user, userId);
+    } catch (error) {
+      throw toBadRequest(error);
+    }
   }
 
   @Post("users")
   async createUser(@Req() req: Request, @Body() body: CreateUserInput) {
     const user = requireUser(req);
-    requireRole(user, userAdminRoles);
 
     try {
       return await this.authService.createUser(user.dataScope, user, body);
+    } catch (error) {
+      throw toBadRequest(error);
+    }
+  }
+
+  @Delete("users/:userId")
+  async deactivateUser(@Req() req: Request, @Param("userId") userId: string) {
+    const user = requireUser(req);
+
+    try {
+      return await this.authService.deactivateUser(user.dataScope, user, userId);
     } catch (error) {
       throw toBadRequest(error);
     }
@@ -61,15 +94,6 @@ function requireUser(req: Request): RequestUser {
   }
 
   return req.user;
-}
-
-function requireRole(user: RequestUser, allowedRoles: ReadonlySet<UserRole>): void {
-  if (!allowedRoles.has(user.role)) {
-    throw new BadRequestException({
-      code: "ROLE_NOT_ALLOWED",
-      message: "Your role cannot manage CI4U users.",
-    });
-  }
 }
 
 function toBadRequest(error: unknown): BadRequestException {

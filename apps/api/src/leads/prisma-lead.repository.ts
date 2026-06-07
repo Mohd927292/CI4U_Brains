@@ -31,6 +31,7 @@ import {
   type QuotationSuggestion,
   type QueueCounts,
   type RawLeadListItem,
+  type TransferLeadRecordInput,
   type WonDetailsSnapshot,
   type UpdateLeadOutcomeRecordInput,
 } from "./lead.types";
@@ -370,6 +371,116 @@ export class PrismaLeadRepository implements LeadRepository {
     return this.toLeadSaveAck(persisted.existing, persisted.lead, input);
   }
 
+  async transferLead(input: TransferLeadRecordInput): Promise<LeadDetail> {
+    await this.prisma.$transaction(async (tx) => {
+      const dataScope = toDbDataScope(input.dataScope);
+      const [lead, actor, target] = await Promise.all([
+        tx.lead.findUnique({
+          where: { id: input.leadId },
+          include: { customer: true, assignedTo: { select: { id: true, name: true } } },
+        }),
+        tx.user.findUnique({ where: { id: input.fromUserId }, select: { id: true, name: true, dataScope: true, status: true } }),
+        tx.user.findUnique({ where: { id: input.toUserId }, select: { id: true, name: true, dataScope: true, status: true } }),
+      ]);
+
+      if (!lead || lead.dataScope !== dataScope) {
+        throw new Error(`Lead ${input.leadId} was not found.`);
+      }
+
+      if (!actor || actor.dataScope !== dataScope || actor.status !== "ACTIVE") {
+        throw new Error("Transfer actor is not an active CI4U user.");
+      }
+
+      if (!target || target.dataScope !== dataScope || target.status !== "ACTIVE") {
+        throw new Error("Transfer target is not an active CI4U user.");
+      }
+
+      await tx.lead.update({
+        where: { id: lead.id },
+        data: {
+          assignedToId: target.id,
+          nextFollowUpAt: input.followUpAt,
+          updatedAt: input.now,
+        },
+      });
+
+      await tx.followUp.updateMany({
+        where: {
+          dataScope,
+          leadId: lead.id,
+          status: "OPEN",
+        },
+        data: {
+          status: "CANCELLED",
+          updatedAt: input.now,
+        },
+      });
+
+      await tx.followUp.create({
+        data: {
+          dataScope,
+          leadId: lead.id,
+          customerId: lead.customerId,
+          dueAt: input.followUpAt,
+          reason: "TRANSFERRED_LEAD",
+          priority: lead.priority,
+          status: "OPEN",
+          assignedToId: target.id,
+          createdAt: input.now,
+          updatedAt: input.now,
+        },
+      });
+
+      const previousOwner = lead.assignedTo?.name ?? "Unassigned";
+      const summary = `Lead transferred from ${previousOwner} to ${target.name} by ${actor.name}. Reason: ${input.reason}`;
+
+      await tx.leadActivity.create({
+        data: {
+          dataScope,
+          leadId: lead.id,
+          customerId: lead.customerId,
+          type: "LEAD_TRANSFERRED",
+          oldStage: lead.currentStage,
+          newStage: lead.currentStage,
+          oldIntent: lead.currentIntent,
+          newIntent: lead.currentIntent,
+          summary,
+          metadata: {
+            fromUserId: lead.assignedToId,
+            transferredById: actor.id,
+            toUserId: target.id,
+            followUpAt: input.followUpAt.toISOString(),
+            reason: input.reason,
+          },
+          createdById: actor.id,
+          createdAt: input.now,
+        },
+      });
+
+      await tx.notification.create({
+        data: {
+          dataScope,
+          userId: target.id,
+          customerId: lead.customerId,
+          type: "LEAD_TRANSFERRED",
+          priority: lead.priority === "HIGH" || lead.priority === "CRITICAL" ? "HIGH" : "MEDIUM",
+          title: "Lead transferred to you",
+          message: `${actor.name} transferred ${lead.customer.businessName} to you. Follow-up is due ${input.followUpAt.toLocaleString("en-IN")}.`,
+          relatedId: lead.id,
+          createdAt: input.now,
+        },
+      });
+    });
+
+    const detail = await this.getLeadDetail(input.dataScope, input.leadId);
+
+    if (!detail) {
+      throw new Error(`Lead ${input.leadId} was not found after transfer.`);
+    }
+
+    return detail;
+  }
+
   private canUseCompactAck(input: UpdateLeadOutcomeRecordInput): boolean {
     return Boolean(
       input.nextFollowUpAt &&
@@ -455,6 +566,7 @@ export class PrismaLeadRepository implements LeadRepository {
             old_intent,
             new_intent,
             summary,
+            created_by_id,
             created_at
           )
           SELECT
@@ -468,6 +580,7 @@ export class PrismaLeadRepository implements LeadRepository {
             existing.current_intent,
             ${input.currentIntent}::"LeadIntent",
             ${input.activitySummary},
+            ${input.actorId},
             ${input.now}
           FROM existing
           RETURNING id
@@ -589,6 +702,7 @@ export class PrismaLeadRepository implements LeadRepository {
           oldIntent: existing.currentIntent,
           newIntent: input.currentIntent,
           summary: input.activitySummary,
+          createdById: input.actorId,
           createdAt: input.now,
         },
       });
@@ -628,6 +742,7 @@ export class PrismaLeadRepository implements LeadRepository {
             month: input.now.getMonth() + 1,
             year: input.now.getFullYear(),
             archivedAt: input.now,
+            archivedById: input.actorId,
             reason: input.activitySummary,
           },
         });
@@ -645,6 +760,7 @@ export class PrismaLeadRepository implements LeadRepository {
             generatedBy: "DETERMINISTIC_DRAFT",
             editedByUser: true,
             status: "DRAFT",
+            sentById: input.actorId,
             createdAt: input.now,
           },
         });

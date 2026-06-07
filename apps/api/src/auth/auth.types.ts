@@ -16,6 +16,17 @@ export type UserRole =
 
 export type DataScope = "development" | "production";
 
+export const permissionCodes = [
+  "ADD_RAW_LEADS",
+  "WORK_ON_LEADS",
+  "TRANSFER_LEADS",
+  "SUPERVISOR",
+  "ADD_USERS",
+  "DELETE_USERS",
+] as const;
+
+export type PermissionCode = (typeof permissionCodes)[number];
+
 export type RequestUser = {
   id: string;
   name: string;

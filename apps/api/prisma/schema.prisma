@@ -75,6 +75,7 @@ enum ActivityType {
   REACTIVATED
   NOTE_ADDED
   WON_MARKED
+  LEAD_TRANSFERRED
 }
 
 enum FollowUpReason {
@@ -226,6 +227,10 @@ model User {
   name          String
   phone         String?
   email         String?
+  postTitle     String?      @map("post_title")
+  roleTags      Json         @default("[]") @map("role_tags")
+  permissionCodes Json       @default("[]") @map("permission_codes")
+  authorityStage Int         @default(1) @map("authority_stage")
   dataScope     DataScope    @default(DEVELOPMENT) @map("data_scope")
   status        UserStatus   @default(INVITED)
   createdAt     DateTime     @default(now()) @map("created_at")

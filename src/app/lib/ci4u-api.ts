@@ -14,10 +14,16 @@ export type DevRole =
   | "SUPPORT_STAFF"
   | "VIEWER";
 
+export type PermissionCode = "ADD_RAW_LEADS" | "WORK_ON_LEADS" | "TRANSFER_LEADS" | "SUPERVISOR" | "ADD_USERS" | "DELETE_USERS";
+
 export type DevSession = {
   userId: string;
   name: string;
   role: DevRole;
+  postTitle?: string | null;
+  roleTags?: string[];
+  permissions?: PermissionCode[];
+  authorityStage?: number;
   dataScope: "development" | "production";
   email?: string | null;
   accessToken?: string;
@@ -30,6 +36,10 @@ export type SessionUser = {
   name: string;
   email: string | null;
   role: DevRole;
+  postTitle: string | null;
+  roleTags: string[];
+  permissions: PermissionCode[];
+  authorityStage: number;
   dataScope: "development" | "production";
   status: "ACTIVE" | "INVITED" | "SUSPENDED" | "DEACTIVATED";
 };
@@ -44,7 +54,54 @@ export type CreateManagedUserInput = {
   name: string;
   email: string;
   role: DevRole;
+  postTitle?: string;
+  roleTags?: string[];
+  permissions?: PermissionCode[];
+  authorityStage?: number;
   temporaryPassword?: string;
+};
+
+export type AccessOptions = {
+  roles: Array<{
+    value: DevRole;
+    label: string;
+    defaultPostTitle: string;
+    defaultRoleTags: string[];
+    defaultAuthorityStage: number;
+    defaultPermissions: PermissionCode[];
+  }>;
+  permissions: Array<{ value: PermissionCode; label: string }>;
+};
+
+export type AssignableUser = {
+  id: string;
+  name: string;
+  email: string | null;
+  role: DevRole;
+  postTitle: string | null;
+  roleTags: string[];
+  authorityStage: number;
+};
+
+export type UserMetrics = {
+  userId: string;
+  userName: string;
+  role: DevRole;
+  postTitle: string | null;
+  authorityStage: number;
+  leadsAdded: number;
+  leadsInteracted: number;
+  warmLeads: number;
+  hotLeads: number;
+  wonLeads: number;
+  leadsAssistedHot: number;
+  leadsAssistedWon: number;
+};
+
+export type TransferLeadInput = {
+  toUserId: string;
+  reason: string;
+  followUpAt?: string;
 };
 
 export type NotificationSummary = {
@@ -441,6 +498,15 @@ export async function apiPost<T>(path: string, session: DevSession, body: unknow
       ...getAuthHeaders(session),
     },
     body: JSON.stringify(body),
+  });
+
+  return parseResponse<T>(response);
+}
+
+export async function apiDelete<T>(path: string, session: DevSession): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method: "DELETE",
+    headers: getAuthHeaders(session),
   });
 
   return parseResponse<T>(response);

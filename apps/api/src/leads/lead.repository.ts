@@ -12,6 +12,7 @@ import {
   type QuotationSuggestion,
   type QueueCounts,
   type RawLeadListItem,
+  type TransferLeadRecordInput,
   type WonDetailsSnapshot,
   type UpdateLeadOutcomeRecordInput,
 } from "./lead.types";
@@ -28,6 +29,7 @@ export interface LeadRepository {
   getLeadDetail(dataScope: DataScope, leadId: string): Promise<LeadDetail | null>;
   updateLeadOutcome(input: UpdateLeadOutcomeRecordInput): Promise<LeadDetail>;
   updateLeadOutcomeAck(input: UpdateLeadOutcomeRecordInput): Promise<LeadSaveAck>;
+  transferLead(input: TransferLeadRecordInput): Promise<LeadDetail>;
 }
 
 export class DuplicatePhoneConflictError extends Error {
@@ -294,6 +296,47 @@ export class InMemoryLeadRepository implements LeadRepository {
       savedAt: input.now,
       serverConfirmed: true,
     };
+  }
+
+  async transferLead(input: TransferLeadRecordInput): Promise<LeadDetail> {
+    const lead = this.leads.get(input.leadId);
+
+    if (!lead || lead.dataScope !== input.dataScope) {
+      throw new Error(`Lead ${input.leadId} was not found.`);
+    }
+
+    lead.nextFollowUpAt = input.followUpAt;
+    lead.updatedAt = input.now;
+
+    const activity = {
+      id: randomUUID(),
+      leadId: lead.id,
+      customerId: lead.customerId,
+      type: "LEAD_TRANSFERRED" as const,
+      summary: `Lead transferred to ${input.toUserId}. Reason: ${input.reason}`,
+      createdAt: input.now,
+    };
+    this.activities.set(lead.id, [...(this.activities.get(lead.id) ?? []), activity]);
+
+    const phoneEntry = Array.from(this.phoneIndex.values()).find((entry) => entry.currentLeadId === lead.id);
+
+    if (phoneEntry) {
+      this.phoneIndex.set(this.scopedPhoneKey(input.dataScope, phoneEntry.phoneNormalized), {
+        ...phoneEntry,
+        assignedToName: input.toUserId,
+        nextFollowUpAt: input.followUpAt,
+        lastActivitySummary: activity.summary,
+        lastUpdatedAt: input.now,
+      });
+    }
+
+    const detail = await this.getLeadDetail(input.dataScope, input.leadId);
+
+    if (!detail) {
+      throw new Error(`Lead ${input.leadId} was not found after transfer.`);
+    }
+
+    return detail;
   }
 
   seedExistingPhone(record: ExistingPhoneRecord): void {
