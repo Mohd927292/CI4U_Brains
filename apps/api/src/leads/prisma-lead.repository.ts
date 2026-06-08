@@ -17,6 +17,7 @@ import {
   type QuotationItem as DbQuotationItem,
   type QuotationPackageTemplate as DbQuotationPackageTemplate,
   type QuotationPackageTemplateItem as DbQuotationPackageTemplateItem,
+  type StaffActivityType as DbStaffActivityType,
   type WonLeadDetails as DbWonLeadDetails,
 } from "../generated/prisma/client";
 import {
@@ -175,6 +176,25 @@ export class PrismaLeadRepository implements LeadRepository {
           createdAt: input.now,
         },
       });
+
+      if (input.createdById) {
+        await tx.staffActivityEvent.create({
+          data: {
+            dataScope: toDbDataScope(input.dataScope),
+            userId: input.createdById,
+            leadId: lead.id,
+            customerId: customer.id,
+            type: input.source.toUpperCase().includes("IMPORT") || input.source.toUpperCase().includes("CSV") ? "LEAD_IMPORTED" : "LEAD_CREATED",
+            summary: `Created raw lead for ${customer.businessName} from ${input.source}.`,
+            metadata: {
+              source: input.source,
+              phoneNormalized: input.phoneNormalized,
+            },
+            occurredAt: input.now,
+            createdAt: input.now,
+          },
+        });
+      }
 
       await tx.phoneIndex.create({
         data: {
@@ -457,6 +477,26 @@ export class PrismaLeadRepository implements LeadRepository {
         },
       });
 
+      await tx.staffActivityEvent.create({
+        data: {
+          dataScope,
+          userId: actor.id,
+          targetUserId: target.id,
+          leadId: lead.id,
+          customerId: lead.customerId,
+          type: "LEAD_TRANSFERRED",
+          summary,
+          metadata: {
+            fromUserId: lead.assignedToId,
+            toUserId: target.id,
+            followUpAt: input.followUpAt.toISOString(),
+            reason: input.reason,
+          },
+          occurredAt: input.now,
+          createdAt: input.now,
+        },
+      });
+
       await tx.notification.create({
         data: {
           dataScope,
@@ -495,8 +535,17 @@ export class PrismaLeadRepository implements LeadRepository {
   private async updateLeadOutcomeAckCompact(input: UpdateLeadOutcomeRecordInput): Promise<LeadSaveAck> {
     const dataScope = toDbDataScope(input.dataScope);
     const activityId = randomUUID();
+    const staffActivityId = randomUUID();
     const followUpId = randomUUID();
     const updateLastCallAt = input.activityType === "CALL_OUTCOME" || input.activityType === "ARCHIVED";
+    const staffActivityType = staffActivityTypeForLeadOutcome(input);
+    const staffActivityMetadata = JSON.stringify({
+      activityType: input.activityType,
+      currentStage: input.currentStage,
+      currentIntent: input.currentIntent,
+      followUpReason: input.followUpReason,
+      nextFollowUpAt: input.nextFollowUpAt?.toISOString() ?? null,
+    });
 
     const rows = await this.prisma.$queryRaw<LeadSaveAckRow[]>(
       Prisma.sql`
@@ -543,10 +592,11 @@ export class PrismaLeadRepository implements LeadRepository {
             AND p.phone_normalized = existing.phone_normalized
           RETURNING p.id
         ),
-        cancelled_followups AS (
+        completed_followups AS (
           UPDATE follow_ups f
           SET
-            status = 'CANCELLED'::"FollowUpStatus",
+            status = 'COMPLETED'::"FollowUpStatus",
+            completed_at = ${input.now},
             updated_at = ${input.now}
           FROM existing
           WHERE f.data_scope = ${dataScope}::"DataScope"
@@ -581,6 +631,33 @@ export class PrismaLeadRepository implements LeadRepository {
             ${input.currentIntent}::"LeadIntent",
             ${input.activitySummary},
             ${input.actorId},
+            ${input.now}
+          FROM existing
+          RETURNING id
+        ),
+        created_staff_activity AS (
+          INSERT INTO staff_activity_events (
+            id,
+            data_scope,
+            user_id,
+            lead_id,
+            customer_id,
+            type,
+            summary,
+            metadata,
+            occurred_at,
+            created_at
+          )
+          SELECT
+            ${staffActivityId},
+            ${dataScope}::"DataScope",
+            ${input.actorId},
+            existing.id,
+            existing.customer_id,
+            ${staffActivityType}::"StaffActivityType",
+            ${input.activitySummary},
+            ${staffActivityMetadata}::jsonb,
+            ${input.now},
             ${input.now}
           FROM existing
           RETURNING id
@@ -707,18 +784,42 @@ export class PrismaLeadRepository implements LeadRepository {
         },
       });
 
-      if (input.nextFollowUpAt) {
-        await tx.followUp.updateMany({
-          where: {
-            dataScope: toDbDataScope(input.dataScope),
-            leadId: existing.id,
-            status: "OPEN",
+      await tx.staffActivityEvent.create({
+        data: {
+          dataScope: toDbDataScope(input.dataScope),
+          userId: input.actorId,
+          leadId: existing.id,
+          customerId: existing.customerId,
+          type: staffActivityTypeForLeadOutcome(input),
+          summary: input.activitySummary,
+          metadata: {
+            activityType: input.activityType,
+            oldStage: existing.currentStage,
+            newStage: input.currentStage,
+            oldIntent: existing.currentIntent,
+            newIntent: input.currentIntent,
+            followUpReason: input.followUpReason,
+            nextFollowUpAt: input.nextFollowUpAt?.toISOString() ?? null,
           },
-          data: {
-            status: "CANCELLED",
-          },
-        });
+          occurredAt: input.now,
+          createdAt: input.now,
+        },
+      });
 
+      await tx.followUp.updateMany({
+        where: {
+          dataScope: toDbDataScope(input.dataScope),
+          leadId: existing.id,
+          status: "OPEN",
+        },
+        data: {
+          status: "COMPLETED",
+          completedAt: input.now,
+          updatedAt: input.now,
+        },
+      });
+
+      if (input.nextFollowUpAt) {
         await tx.followUp.create({
           data: {
             dataScope: toDbDataScope(input.dataScope),
@@ -728,6 +829,8 @@ export class PrismaLeadRepository implements LeadRepository {
             reason: input.followUpReason ?? "FOLLOW_UP",
             priority: input.priority,
             assignedToId: existing.assignedToId,
+            createdAt: input.now,
+            updatedAt: input.now,
           },
         });
       }
@@ -764,6 +867,23 @@ export class PrismaLeadRepository implements LeadRepository {
             createdAt: input.now,
           },
         });
+
+        await tx.staffActivityEvent.create({
+          data: {
+            dataScope: toDbDataScope(input.dataScope),
+            userId: input.actorId,
+            leadId: existing.id,
+            customerId: existing.customerId,
+            type: "WHATSAPP_DRAFTED",
+            summary: `WhatsApp draft created for ${existing.customer.businessName}.`,
+            metadata: {
+              messageType: "LEAD_FOLLOW_UP",
+              bodyLength: input.whatsappMessageBody.length,
+            },
+            occurredAt: input.now,
+            createdAt: input.now,
+          },
+        });
       }
 
       if (input.quotation) {
@@ -792,6 +912,24 @@ export class PrismaLeadRepository implements LeadRepository {
                 },
               })),
             },
+          },
+        });
+
+        await tx.staffActivityEvent.create({
+          data: {
+            dataScope: toDbDataScope(input.dataScope),
+            userId: input.actorId,
+            leadId: existing.id,
+            customerId: existing.customerId,
+            type: "QUOTATION_CREATED",
+            summary: `Quotation saved for ${existing.customer.businessName}: ${input.quotation.title}.`,
+            metadata: {
+              title: input.quotation.title,
+              totalPricePaise: input.quotation.totalPricePaise,
+              packageCount: input.quotation.packages.length,
+            },
+            occurredAt: input.now,
+            createdAt: input.now,
           },
         });
 
@@ -1078,4 +1216,32 @@ function toDbDataScope(dataScope: DataScope): DbDataScope {
 
 function toAppDataScope(dataScope: DbDataScope): DataScope {
   return dataScope === DbDataScope.PRODUCTION ? "production" : "development";
+}
+
+function staffActivityTypeForLeadOutcome(input: UpdateLeadOutcomeRecordInput): DbStaffActivityType {
+  if (input.currentStage === "CAPTURED_WON") {
+    return "LEAD_WON_MARKED";
+  }
+
+  if (input.currentStage === "LOST") {
+    return "LEAD_LOST_MARKED";
+  }
+
+  if (input.currentStage === "WARM") {
+    return "LEAD_WARM_MARKED";
+  }
+
+  if (input.currentStage === "HOT_INSTALLATION" || input.currentStage === "HOT_REPAIR_SERVICE") {
+    return input.followUpReason === "SITE_VISIT" ? "SITE_VISIT_COORDINATED" : "LEAD_HOT_MARKED";
+  }
+
+  if (input.nextFollowUpAt) {
+    return "FOLLOW_UP_SCHEDULED";
+  }
+
+  if (input.activityType === "ARCHIVED") {
+    return "LEAD_STAGE_CHANGED";
+  }
+
+  return "LEAD_INTERACTION";
 }

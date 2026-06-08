@@ -220,6 +220,34 @@ enum WorkCertificateAudience {
   VENDOR
 }
 
+enum StaffActivityType {
+  STAFF_INVITED
+  STAFF_CREATED
+  STAFF_UPDATED
+  STAFF_DEACTIVATED
+  LEAD_CREATED
+  LEAD_IMPORTED
+  LEAD_INTERACTION
+  LEAD_TRANSFERRED
+  LEAD_ASSISTED
+  LEAD_STAGE_CHANGED
+  LEAD_WARM_MARKED
+  LEAD_HOT_MARKED
+  LEAD_WON_MARKED
+  LEAD_LOST_MARKED
+  FOLLOW_UP_SCHEDULED
+  FOLLOW_UP_COMPLETED
+  FOLLOW_UP_MISSED
+  QUOTATION_CREATED
+  SITE_VISIT_COORDINATED
+  WHATSAPP_DRAFTED
+  VENDOR_CREATED
+  JOB_CREATED
+  JOB_ASSIGNED
+  WORK_STARTED
+  WORK_COMPLETED
+}
+
 model User {
   id            String       @id @default(cuid())
   authProvider String?      @map("auth_provider")
@@ -245,6 +273,8 @@ model User {
   auditLogs          AuditLog[]         @relation("AuditActor")
   archivedRecords    ArchiveRecord[]    @relation("ArchiveActor")
   reactivatedRecords ArchiveRecord[]    @relation("ReactivationActor")
+  staffActivityEvents StaffActivityEvent[] @relation("StaffActivityActor")
+  targetedStaffActivityEvents StaffActivityEvent[] @relation("StaffActivityTarget")
 
   @@unique([dataScope, authSubject])
   @@unique([dataScope, email])
@@ -330,6 +360,7 @@ model Customer {
   notifications    Notification[]
   archives         ArchiveRecord[]
   certificates     WorkCertificate[]
+  staffActivityEvents StaffActivityEvent[]
 
   @@index([dataScope, businessName])
   @@index([area, pincode])
@@ -390,6 +421,7 @@ model Lead {
   job            Job?
   archives       ArchiveRecord[]
   importRows     ImportRow[]
+  staffActivityEvents StaffActivityEvent[]
 
   @@unique([customerId, leadCycleNumber])
   @@index([dataScope, currentStage, nextFollowUpAt])
@@ -676,6 +708,7 @@ model Job {
   photos         JobPhoto[]
   checklists     JobChecklist[]
   certificates   WorkCertificate[]
+  staffActivityEvents StaffActivityEvent[]
 
   @@index([dataScope, status, scheduledAt])
   @@index([dataScope, assignedVendorId, status])
@@ -794,6 +827,35 @@ model WorkCertificate {
   @@index([customerId])
   @@index([vendorId])
   @@map("work_certificates")
+}
+
+model StaffActivityEvent {
+  id           String            @id @default(cuid())
+  dataScope    DataScope         @default(DEVELOPMENT) @map("data_scope")
+  userId       String?           @map("user_id")
+  targetUserId String?           @map("target_user_id")
+  leadId       String?           @map("lead_id")
+  customerId   String?           @map("customer_id")
+  jobId        String?           @map("job_id")
+  type         StaffActivityType
+  summary      String
+  metadata     Json              @default("{}")
+  occurredAt   DateTime          @default(now()) @map("occurred_at")
+  createdAt    DateTime          @default(now()) @map("created_at")
+
+  user       User?     @relation("StaffActivityActor", fields: [userId], references: [id], onDelete: SetNull)
+  targetUser User?     @relation("StaffActivityTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+  lead       Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  job        Job?      @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  @@index([dataScope, userId, occurredAt])
+  @@index([dataScope, type, occurredAt])
+  @@index([dataScope, targetUserId, occurredAt])
+  @@index([leadId])
+  @@index([customerId])
+  @@index([jobId])
+  @@map("staff_activity_events")
 }
 
 model Notification {

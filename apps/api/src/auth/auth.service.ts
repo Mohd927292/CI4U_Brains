@@ -1,8 +1,14 @@
-import { Injectable } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { PrismaService } from "../database/prisma.service";
-import { DataScope as DbDataScope, type Notification as DbNotification, type Role as DbRole, type User as DbUser } from "../generated/prisma/client";
+import {
+  DataScope as DbDataScope,
+  type Notification as DbNotification,
+  Prisma,
+  type Role as DbRole,
+  type User as DbUser,
+} from "../generated/prisma/client";
 import type { DataScope, PermissionCode, RequestUser, UserRole } from "./auth.types";
 import { permissionCodes } from "./auth.types";
 
@@ -65,6 +71,8 @@ const userCreateSchema = z.object({
 });
 
 export type CreateUserInput = z.input<typeof userCreateSchema>;
+const userUpdateSchema = userCreateSchema.omit({ email: true }).partial();
+export type UpdateUserInput = z.input<typeof userUpdateSchema>;
 
 export type SessionUser = {
   id: string;
@@ -114,6 +122,86 @@ export type UserMetrics = {
   wonLeads: number;
   leadsAssistedHot: number;
   leadsAssistedWon: number;
+  summary: StaffPerformanceSummary;
+  quickRanges: {
+    today: StaffPerformanceQuickRange;
+    week: StaffPerformanceQuickRange;
+    month: StaffPerformanceQuickRange;
+  };
+  dailyBreakdown: StaffDailyPerformance[];
+  range: {
+    from: Date;
+    to: Date;
+  };
+};
+
+export type StaffPerformanceRangeInput = {
+  from?: string;
+  to?: string;
+};
+
+export type StaffPerformanceSummary = {
+  leadsAdded: number;
+  leadsHandled: number;
+  assists: number;
+  leadsAssistedHot: number;
+  leadsAssistedWon: number;
+  wonLeads: number;
+  hotLeadsCaptured: number;
+  completeWonLeads: number;
+  followUpsCompleted: number;
+  followUpsMissedOrDelayed: number;
+  stageMovements: number;
+  quotationsHandled: number;
+  siteVisitsCoordinated: number;
+  warmLeadHandling: number;
+  installationLeadHandling: number;
+  repairServiceLeadHandling: number;
+  capturedProjects: number;
+  whatsappDrafts: number;
+  vendorsCreated: number;
+  jobsCreated: number;
+  jobsAssigned: number;
+  workStarted: number;
+  workCompleted: number;
+  activeActions: number;
+  conversionRate: number;
+};
+
+export type StaffPerformanceQuickRange = Pick<StaffPerformanceSummary, "leadsHandled" | "assists" | "wonLeads" | "followUpsCompleted">;
+
+export type StaffDailyPerformance = {
+  date: string;
+  leadsHandled: number;
+  assists: number;
+  wonLeads: number;
+  followUpsCompleted: number;
+  quotationsHandled: number;
+  siteVisitsCoordinated: number;
+};
+
+export type LeaderboardEntry = {
+  userId: string;
+  userName: string;
+  role: UserRole;
+  postTitle: string | null;
+  authorityStage: number;
+  value: number;
+  helper: string;
+};
+
+export type LeaderboardCategory = {
+  key: string;
+  label: string;
+  entries: LeaderboardEntry[];
+};
+
+export type StaffLeaderboards = {
+  range: {
+    from: Date;
+    to: Date;
+  };
+  categories: LeaderboardCategory[];
 };
 
 type DbUserWithRoles = DbUser & {
@@ -133,7 +221,7 @@ export type NotificationSummary = {
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   async getCurrentUser(requestUser: RequestUser): Promise<SessionUser> {
     if (requestUser.authProvider === "dev") {
@@ -169,7 +257,7 @@ export class AuthService {
       orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
     });
 
-    return users.map((user) => this.toManagedUser(user, user.roles.map((entry) => entry.role), "SYNCED_LOGIN"));
+    return users.map((user) => this.toManagedUser(user, user.roles.map((entry) => entry.role), provisioningForUser(user)));
   }
 
   getAccessOptions(): AccessOptions {
@@ -234,6 +322,13 @@ export class AuthService {
 
     this.requireStage(actorProfile, authorityStage, "create or manage this user");
 
+    if (!adminClient && dataScope === "production") {
+      throw new AuthWorkflowError(
+        "Staff invitation is not connected yet. Add the Supabase service-role key to the API server once, then staff invites will work from this screen.",
+        "STAFF_INVITE_NOT_CONFIGURED",
+      );
+    }
+
     let authSubject: string | null = null;
     let provisioning: ManagedUser["authProvisioning"] = "LOCAL_ONLY";
 
@@ -291,6 +386,15 @@ export class AuthService {
           },
         },
       });
+
+      if (existing) {
+        if (existing.id === actorProfile.id) {
+          throw new AuthWorkflowError("You cannot change your own access from staff management.", "SELF_ACCESS_CHANGE_BLOCKED");
+        }
+
+        this.requireStage(actorProfile, existing.authorityStage, "change this existing user");
+      }
+
       const savedUser = existing
         ? await tx.user.update({
             where: { id: existing.id },
@@ -308,7 +412,6 @@ export class AuthService {
           })
         : await tx.user.create({
             data: {
-              ...(authSubject ? { id: authSubject } : {}),
               authProvider: authSubject ? "supabase" : null,
               authSubject,
               name: parsed.name,
@@ -345,10 +448,254 @@ export class AuthService {
         },
       });
 
+      await tx.staffActivityEvent.create({
+        data: {
+          dataScope: toDbDataScope(dataScope),
+          userId: actorProfile.id,
+          targetUserId: savedUser.id,
+          type: provisioning === "SUPABASE_INVITED" ? "STAFF_INVITED" : "STAFF_CREATED",
+          summary:
+            provisioning === "SUPABASE_INVITED"
+              ? `${actorProfile.name} invited ${savedUser.name} as ${postTitle}.`
+              : `${actorProfile.name} created ${savedUser.name} as ${postTitle}.`,
+          metadata: {
+            role,
+            permissions,
+            authorityStage,
+            provisioning,
+          },
+          occurredAt: now,
+          createdAt: now,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          dataScope: toDbDataScope(dataScope),
+          actorId: actorProfile.id,
+          action: existing ? "STAFF_ACCESS_REPLACED" : "STAFF_ACCESS_CREATED",
+          entityType: "User",
+          entityId: savedUser.id,
+          before: existing
+            ? {
+                name: existing.name,
+                postTitle: existing.postTitle,
+                roleTags: existing.roleTags,
+                permissionCodes: existing.permissionCodes,
+                authorityStage: existing.authorityStage,
+                status: existing.status,
+              }
+            : Prisma.JsonNull,
+          after: {
+            name: savedUser.name,
+            postTitle: savedUser.postTitle,
+            roleTags: savedUser.roleTags,
+            permissionCodes: savedUser.permissionCodes,
+            authorityStage: savedUser.authorityStage,
+            status: savedUser.status,
+          },
+          metadata: {
+            email,
+            role,
+            provisioning,
+          },
+          createdAt: now,
+        },
+      });
+
       return savedUser;
     });
 
     return this.toManagedUser(user, [roleRecord], provisioning);
+  }
+
+  async updateUser(dataScope: DataScope, actor: RequestUser, userId: string, input: UpdateUserInput): Promise<ManagedUser> {
+    const parsed = userUpdateSchema.parse(input);
+    const actorProfile = await this.getCurrentUser(actor);
+    this.requirePermission(actorProfile, "ADD_USERS");
+
+    if (actorProfile.id === userId) {
+      throw new AuthWorkflowError("You cannot change your own access from staff management.", "SELF_ACCESS_CHANGE_BLOCKED");
+    }
+
+    const target = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: userWithRoles,
+    });
+
+    if (!target || target.dataScope !== toDbDataScope(dataScope)) {
+      throw new AuthWorkflowError("User was not found.", "USER_NOT_FOUND");
+    }
+
+    this.requireStage(actorProfile, target.authorityStage, "change this user");
+
+    const existingRole = roleFromRecords(target.roles.map((entry) => entry.role));
+    const role = (parsed.role as UserRole | undefined) ?? existingRole;
+    const postTitle = parsed.postTitle?.trim() || target.postTitle || defaultPostTitle(role);
+    const roleTags = parsed.roleTags ? uniqueStrings(parsed.roleTags) : toStringArray(target.roleTags);
+    const permissions = parsed.permissions ? uniquePermissions(parsed.permissions) : normalizePermissions(target.permissionCodes, role);
+    const authorityStage = parsed.authorityStage ?? target.authorityStage;
+    const now = new Date();
+
+    this.requireStage(actorProfile, authorityStage, "set this user's authority stage");
+
+    const adminClient = this.getSupabaseAdminClient();
+    let authSubject = target.authSubject;
+    let authProvider = target.authProvider;
+    let provisioning: ManagedUser["authProvisioning"] = provisioningForUser(target);
+    let nextStatus = target.status;
+
+    if (!adminClient && dataScope === "production" && !authSubject) {
+      throw new AuthWorkflowError(
+        "This staff record is not connected to login yet. Add the Supabase service-role key to the API server, then save this staff member again.",
+        "STAFF_INVITE_NOT_CONFIGURED",
+      );
+    }
+
+    if (adminClient && !authSubject) {
+      const appMetadata = { ci4u_role: role, ci4u_permissions: permissions, ci4u_authority_stage: authorityStage };
+      const userMetadata = { name: parsed.name ?? target.name, postTitle, roleTags };
+
+      if (parsed.temporaryPassword) {
+        if (!target.email) {
+          throw new AuthWorkflowError("This staff record has no email, so login cannot be created.", "STAFF_EMAIL_REQUIRED");
+        }
+
+        const { data, error } = await adminClient.auth.admin.createUser({
+          email: target.email,
+          password: parsed.temporaryPassword,
+          email_confirm: true,
+          app_metadata: appMetadata,
+          user_metadata: userMetadata,
+        });
+
+        if (error) {
+          throw new AuthWorkflowError(error.message, "SUPABASE_USER_CREATE_FAILED");
+        }
+
+        authSubject = data.user?.id ?? null;
+        authProvider = authSubject ? "supabase" : authProvider;
+        nextStatus = authSubject ? "ACTIVE" : nextStatus;
+        provisioning = authSubject ? "SUPABASE_CREATED" : provisioning;
+      } else if (target.email) {
+        const redirectTo = process.env.CI4U_AUTH_INVITE_REDIRECT_URL;
+        const { data, error } = await adminClient.auth.admin.inviteUserByEmail(target.email, {
+          data: userMetadata,
+          ...(redirectTo ? { redirectTo } : {}),
+        });
+
+        if (error) {
+          throw new AuthWorkflowError(error.message, "SUPABASE_USER_INVITE_FAILED");
+        }
+
+        authSubject = data.user?.id ?? null;
+        authProvider = authSubject ? "supabase" : authProvider;
+        provisioning = authSubject ? "SUPABASE_INVITED" : provisioning;
+      }
+    }
+
+    if (adminClient && authSubject) {
+      const { error } = await adminClient.auth.admin.updateUserById(authSubject, {
+        app_metadata: {
+          ci4u_role: role,
+          ci4u_permissions: permissions,
+          ci4u_authority_stage: authorityStage,
+        },
+        user_metadata: {
+          name: parsed.name ?? target.name,
+          postTitle,
+          roleTags,
+        },
+      });
+
+      if (error) {
+        throw new AuthWorkflowError(error.message, "SUPABASE_USER_METADATA_FAILED");
+      }
+    }
+
+    const roleRecord = await this.ensureRole(role);
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const savedUser = await tx.user.update({
+        where: { id: target.id },
+        data: {
+          authProvider,
+          authSubject,
+          name: parsed.name?.trim() || target.name,
+          postTitle,
+          roleTags,
+          permissionCodes: permissions,
+          authorityStage,
+          status: nextStatus,
+          updatedAt: now,
+        },
+      });
+
+      await tx.userRole.deleteMany({ where: { userId: savedUser.id } });
+      await tx.userRole.create({
+        data: {
+          userId: savedUser.id,
+          roleId: roleRecord.id,
+          createdAt: now,
+        },
+      });
+
+      await tx.staffActivityEvent.create({
+        data: {
+          dataScope: toDbDataScope(dataScope),
+          userId: actorProfile.id,
+          targetUserId: savedUser.id,
+          type: provisioning === "SUPABASE_INVITED" ? "STAFF_INVITED" : "STAFF_UPDATED",
+          summary: `${actorProfile.name} updated ${savedUser.name}'s CI4U access.`,
+          metadata: {
+            role,
+            postTitle,
+            roleTags,
+            permissions,
+            authorityStage,
+            provisioning,
+          },
+          occurredAt: now,
+          createdAt: now,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          dataScope: toDbDataScope(dataScope),
+          actorId: actorProfile.id,
+          action: "STAFF_ACCESS_UPDATED",
+          entityType: "User",
+          entityId: savedUser.id,
+          before: {
+            name: target.name,
+            postTitle: target.postTitle,
+            roleTags: target.roleTags,
+            permissionCodes: target.permissionCodes,
+            authorityStage: target.authorityStage,
+            status: target.status,
+            role: existingRole,
+          },
+          after: {
+            name: savedUser.name,
+            postTitle: savedUser.postTitle,
+            roleTags: savedUser.roleTags,
+            permissionCodes: savedUser.permissionCodes,
+            authorityStage: savedUser.authorityStage,
+            status: savedUser.status,
+            role,
+          },
+          metadata: {
+            email: savedUser.email,
+            provisioning,
+          },
+          createdAt: now,
+        },
+      });
+
+      return savedUser;
+    });
+
+    return this.toManagedUser(updated, [roleRecord], provisioning);
   }
 
   assertPermission(user: SessionUser, permission: PermissionCode): void {
@@ -374,19 +721,84 @@ export class AuthService {
 
     this.requireStage(actorProfile, target.authorityStage, "deactivate this user");
 
-    const updated = await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        status: "DEACTIVATED",
-        updatedAt: new Date(),
-      },
-      include: userWithRoles,
+    const adminClient = this.getSupabaseAdminClient();
+    if (adminClient && target.authSubject) {
+      const { error } = await adminClient.auth.admin.deleteUser(target.authSubject);
+
+      if (error && !error.message.toLowerCase().includes("not found")) {
+        throw new AuthWorkflowError(error.message, "SUPABASE_USER_DELETE_FAILED");
+      }
+    }
+
+    const now = new Date();
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const saved = await tx.user.update({
+        where: { id: userId },
+        data: {
+          status: "DEACTIVATED",
+          authProvider: null,
+          authSubject: null,
+          updatedAt: now,
+        },
+        include: userWithRoles,
+      });
+
+      await tx.notification.deleteMany({
+        where: {
+          dataScope: toDbDataScope(dataScope),
+          userId,
+          read: false,
+        },
+      });
+
+      await tx.staffActivityEvent.create({
+        data: {
+          dataScope: toDbDataScope(dataScope),
+          userId: actorProfile.id,
+          targetUserId: userId,
+          type: "STAFF_DEACTIVATED",
+          summary: `${actorProfile.name} removed CI4U access for ${target.name}.`,
+          metadata: {
+            email: target.email,
+            previousStatus: target.status,
+            previousAuthProvider: target.authProvider,
+          },
+          occurredAt: now,
+          createdAt: now,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          dataScope: toDbDataScope(dataScope),
+          actorId: actorProfile.id,
+          action: "STAFF_ACCESS_DEACTIVATED",
+          entityType: "User",
+          entityId: userId,
+          before: {
+            status: target.status,
+            authProvider: target.authProvider,
+            authSubject: target.authSubject,
+          },
+          after: {
+            status: saved.status,
+            authProvider: saved.authProvider,
+            authSubject: saved.authSubject,
+          },
+          metadata: {
+            email: target.email,
+          },
+          createdAt: now,
+        },
+      });
+
+      return saved;
     });
 
-    return this.toManagedUser(updated, updated.roles.map((entry) => entry.role), "SYNCED_LOGIN");
+    return this.toManagedUser(updated, updated.roles.map((entry) => entry.role), provisioningForUser(updated));
   }
 
-  async getUserMetrics(dataScope: DataScope, actor: RequestUser, userId: string): Promise<UserMetrics> {
+  async getUserMetrics(dataScope: DataScope, actor: RequestUser, userId: string, rangeInput: StaffPerformanceRangeInput = {}): Promise<UserMetrics> {
     const actorProfile = await this.getCurrentUser(actor);
     this.requirePermission(actorProfile, "SUPERVISOR");
 
@@ -402,6 +814,8 @@ export class AuthService {
     this.requireStage(actorProfile, target.authorityStage, "supervise this user");
 
     const dbScope = toDbDataScope(dataScope);
+    const now = new Date();
+    const range = resolvePerformanceRange(rangeInput, now);
     const [leadsAdded, leadsInteracted, warmLeads, hotInstallation, hotRepair, wonLeads, transferredLeadRows] = await Promise.all([
       this.prisma.leadActivity.count({
         where: { dataScope: dbScope, createdById: userId, type: { in: ["LEAD_CREATED", "LEAD_IMPORTED"] } },
@@ -437,6 +851,13 @@ export class AuthService {
           }),
         ])
       : [0, 0];
+    const [summary, today, week, month, dailyBreakdown] = await Promise.all([
+      this.buildPerformanceSummary(dbScope, userId, range.from, range.to, now),
+      this.buildPerformanceSummary(dbScope, userId, startOfDay(now), now, now),
+      this.buildPerformanceSummary(dbScope, userId, startOfWeek(now), now, now),
+      this.buildPerformanceSummary(dbScope, userId, startOfMonth(now), now, now),
+      this.buildDailyBreakdown(dbScope, userId, range.from, range.to),
+    ]);
 
     return {
       userId: target.id,
@@ -451,7 +872,350 @@ export class AuthService {
       wonLeads,
       leadsAssistedHot,
       leadsAssistedWon,
+      summary,
+      quickRanges: {
+        today: toQuickRange(today),
+        week: toQuickRange(week),
+        month: toQuickRange(month),
+      },
+      dailyBreakdown,
+      range,
     };
+  }
+
+  async getLeaderboards(dataScope: DataScope, actor: RequestUser, rangeInput: StaffPerformanceRangeInput = {}): Promise<StaffLeaderboards> {
+    const actorProfile = await this.getCurrentUser(actor);
+    this.requirePermission(actorProfile, "SUPERVISOR");
+
+    const now = new Date();
+    const range = resolvePerformanceRange(rangeInput, now);
+    const users = await this.prisma.user.findMany({
+      where: {
+        dataScope: toDbDataScope(dataScope),
+        status: { not: "DEACTIVATED" },
+        authorityStage: { lte: actorProfile.authorityStage },
+      },
+      include: userWithRoles,
+      orderBy: [{ authorityStage: "desc" }, { name: "asc" }],
+    });
+
+    const rows = await Promise.all(
+      users.map(async (user) => ({
+        user,
+        role: roleFromRecords(user.roles.map((entry) => entry.role)),
+        summary: await this.buildPerformanceSummary(toDbDataScope(dataScope), user.id, range.from, range.to, now),
+      })),
+    );
+
+    const makeEntries = (selector: (summary: StaffPerformanceSummary) => number, helper: (summary: StaffPerformanceSummary) => string): LeaderboardEntry[] =>
+      rows
+        .map(({ user, role, summary }) => ({
+          userId: user.id,
+          userName: user.name,
+          role,
+          postTitle: user.postTitle,
+          authorityStage: user.authorityStage,
+          value: selector(summary),
+          helper: helper(summary),
+        }))
+        .filter((entry) => entry.value > 0)
+        .sort((a, b) => b.value - a.value || b.authorityStage - a.authorityStage || a.userName.localeCompare(b.userName))
+        .slice(0, 10);
+
+    return {
+      range,
+      categories: [
+        {
+          key: "most_won_leads",
+          label: "Most won leads",
+          entries: makeEntries((summary) => summary.wonLeads, (summary) => `${summary.conversionRate}% conversion`),
+        },
+        {
+          key: "most_assists",
+          label: "Most assists",
+          entries: makeEntries((summary) => summary.assists, (summary) => `${summary.leadsAssistedWon} assisted wins`),
+        },
+        {
+          key: "most_hot_leads",
+          label: "Most hot leads captured",
+          entries: makeEntries((summary) => summary.hotLeadsCaptured, (summary) => `${summary.installationLeadHandling} install / ${summary.repairServiceLeadHandling} service`),
+        },
+        {
+          key: "most_leads_handled",
+          label: "Most leads handled",
+          entries: makeEntries((summary) => summary.leadsHandled, (summary) => `${summary.activeActions} total actions`),
+        },
+        {
+          key: "best_follow_up_completion",
+          label: "Best follow-up completion",
+          entries: makeEntries((summary) => summary.followUpsCompleted, (summary) => `${summary.followUpsMissedOrDelayed} overdue/open`),
+        },
+        {
+          key: "highest_conversion",
+          label: "Highest conversion performer",
+          entries: makeEntries((summary) => summary.conversionRate, (summary) => `${summary.wonLeads}/${Math.max(summary.leadsHandled, 1)} handled leads`),
+        },
+        {
+          key: "best_installation_closer",
+          label: "Best installation lead closer",
+          entries: makeEntries((summary) => summary.installationLeadHandling, (summary) => `${summary.hotLeadsCaptured} hot captures`),
+        },
+        {
+          key: "best_repair_service_closer",
+          label: "Best repair/service lead closer",
+          entries: makeEntries((summary) => summary.repairServiceLeadHandling, (summary) => `${summary.hotLeadsCaptured} hot captures`),
+        },
+        {
+          key: "best_warm_handler",
+          label: "Best warm lead handler",
+          entries: makeEntries((summary) => summary.warmLeadHandling, (summary) => `${summary.followUpsCompleted} follow-ups completed`),
+        },
+        {
+          key: "most_quotations",
+          label: "Most quotations handled",
+          entries: makeEntries((summary) => summary.quotationsHandled, (summary) => `${summary.wonLeads} wins`),
+        },
+        {
+          key: "most_site_visits",
+          label: "Most site visits coordinated",
+          entries: makeEntries((summary) => summary.siteVisitsCoordinated, (summary) => `${summary.wonLeads} wins`),
+        },
+        {
+          key: "most_jobs_assigned",
+          label: "Most jobs assigned",
+          entries: makeEntries((summary) => summary.jobsAssigned, (summary) => `${summary.workStarted} work starts`),
+        },
+        {
+          key: "most_work_completed",
+          label: "Most work completed",
+          entries: makeEntries((summary) => summary.workCompleted, (summary) => `${summary.jobsAssigned} jobs assigned`),
+        },
+        {
+          key: "most_vendors_added",
+          label: "Most vendors added",
+          entries: makeEntries((summary) => summary.vendorsCreated, (summary) => `${summary.jobsAssigned} jobs assigned`),
+        },
+      ],
+    };
+  }
+
+  private async buildPerformanceSummary(dbScope: DbDataScope, userId: string, from: Date, to: Date, now: Date): Promise<StaffPerformanceSummary> {
+    const activityRange = { gte: from, lte: to };
+    const [activityRows, staffActivityRows, handledLeadRows, transferRows, followUpsCompleted, followUpsMissedOrDelayed, whatsappDrafts] = await Promise.all([
+      this.prisma.leadActivity.findMany({
+        where: {
+          dataScope: dbScope,
+          createdById: userId,
+          createdAt: activityRange,
+        },
+        select: {
+          leadId: true,
+          type: true,
+          newStage: true,
+          summary: true,
+          createdAt: true,
+        },
+      }),
+      this.prisma.staffActivityEvent.findMany({
+        where: {
+          dataScope: dbScope,
+          userId,
+          occurredAt: activityRange,
+        },
+        select: {
+          type: true,
+        },
+      }),
+      this.prisma.leadActivity.findMany({
+        where: {
+          dataScope: dbScope,
+          createdById: userId,
+          createdAt: activityRange,
+          type: { in: ["CALL_OUTCOME", "ARCHIVED", "WON_MARKED", "FOLLOW_UP_SCHEDULED", "LEAD_TRANSFERRED"] },
+        },
+        distinct: ["leadId"],
+        select: { leadId: true },
+      }),
+      this.prisma.leadActivity.findMany({
+        where: {
+          dataScope: dbScope,
+          createdById: userId,
+          createdAt: activityRange,
+          type: "LEAD_TRANSFERRED",
+        },
+        select: { leadId: true },
+      }),
+      this.prisma.followUp.count({
+        where: {
+          dataScope: dbScope,
+          assignedToId: userId,
+          status: "COMPLETED",
+          completedAt: activityRange,
+        },
+      }),
+      this.prisma.followUp.count({
+        where: {
+          dataScope: dbScope,
+          assignedToId: userId,
+          status: "OPEN",
+          dueAt: {
+            gte: from,
+            lte: now < to ? now : to,
+            lt: now,
+          },
+        },
+      }),
+      this.prisma.whatsAppMessage.count({
+        where: {
+          dataScope: dbScope,
+          sentById: userId,
+          createdAt: activityRange,
+        },
+      }),
+    ]);
+
+    const transferredLeadIds = Array.from(new Set(transferRows.map((row) => row.leadId)));
+    const [leadsAssistedHot, leadsAssistedWon] = transferredLeadIds.length
+      ? await Promise.all([
+          this.prisma.lead.count({
+            where: {
+              dataScope: dbScope,
+              id: { in: transferredLeadIds },
+              currentStage: { in: ["HOT_INSTALLATION", "HOT_REPAIR_SERVICE"] },
+            },
+          }),
+          this.prisma.lead.count({
+            where: {
+              dataScope: dbScope,
+              id: { in: transferredLeadIds },
+              currentStage: "CAPTURED_WON",
+            },
+          }),
+        ])
+      : [0, 0];
+
+    const leadsAdded = activityRows.filter((row) => row.type === "LEAD_CREATED" || row.type === "LEAD_IMPORTED").length;
+    const wonLeads = activityRows.filter((row) => row.type === "WON_MARKED" || row.newStage === "CAPTURED_WON").length;
+    const hotLeadsCaptured = activityRows.filter((row) => row.newStage === "HOT_INSTALLATION" || row.newStage === "HOT_REPAIR_SERVICE").length;
+    const warmLeadHandling = activityRows.filter((row) => row.newStage === "WARM").length;
+    const installationLeadHandling = activityRows.filter((row) => row.newStage === "HOT_INSTALLATION").length;
+    const repairServiceLeadHandling = activityRows.filter((row) => row.newStage === "HOT_REPAIR_SERVICE").length;
+    const stageMovements = activityRows.filter((row) => row.newStage).length;
+    const quotationsHandled = activityRows.filter((row) => row.summary?.toLowerCase().includes("quotation saved")).length;
+    const siteVisitsCoordinated = activityRows.filter((row) => row.summary?.toLowerCase().includes("site visit")).length;
+    const countStaffEvents = (types: string[]) => staffActivityRows.filter((row) => types.includes(row.type)).length;
+    const vendorsCreated = countStaffEvents(["VENDOR_CREATED"]);
+    const jobsCreated = countStaffEvents(["JOB_CREATED"]);
+    const jobsAssigned = countStaffEvents(["JOB_ASSIGNED"]);
+    const workStarted = countStaffEvents(["WORK_STARTED"]);
+    const workCompleted = countStaffEvents(["WORK_COMPLETED"]);
+    const operationsActions = vendorsCreated + jobsCreated + jobsAssigned + workStarted + workCompleted;
+    const activeActions = activityRows.length + followUpsCompleted + whatsappDrafts + operationsActions;
+    const leadsHandled = handledLeadRows.length;
+    const conversionRate = leadsHandled ? Math.round((wonLeads / leadsHandled) * 100) : 0;
+
+    return {
+      leadsAdded,
+      leadsHandled,
+      assists: transferredLeadIds.length,
+      leadsAssistedHot,
+      leadsAssistedWon,
+      wonLeads,
+      hotLeadsCaptured,
+      completeWonLeads: wonLeads,
+      followUpsCompleted,
+      followUpsMissedOrDelayed,
+      stageMovements,
+      quotationsHandled,
+      siteVisitsCoordinated,
+      warmLeadHandling,
+      installationLeadHandling,
+      repairServiceLeadHandling,
+      capturedProjects: wonLeads,
+      whatsappDrafts,
+      vendorsCreated,
+      jobsCreated,
+      jobsAssigned,
+      workStarted,
+      workCompleted,
+      activeActions,
+      conversionRate,
+    };
+  }
+
+  private async buildDailyBreakdown(dbScope: DbDataScope, userId: string, from: Date, to: Date): Promise<StaffDailyPerformance[]> {
+    const activityRows = await this.prisma.leadActivity.findMany({
+      where: {
+        dataScope: dbScope,
+        createdById: userId,
+        createdAt: { gte: from, lte: to },
+      },
+      select: {
+        type: true,
+        newStage: true,
+        summary: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: "asc" },
+      take: 5000,
+    });
+    const completedFollowUps = await this.prisma.followUp.findMany({
+      where: {
+        dataScope: dbScope,
+        assignedToId: userId,
+        status: "COMPLETED",
+        completedAt: { gte: from, lte: to },
+      },
+      select: { completedAt: true },
+      take: 5000,
+    });
+    const byDate = new Map<string, StaffDailyPerformance>();
+    const getDay = (date: Date) => date.toISOString().slice(0, 10);
+    const ensure = (date: string) => {
+      const existing = byDate.get(date);
+      if (existing) {
+        return existing;
+      }
+
+      const created = {
+        date,
+        leadsHandled: 0,
+        assists: 0,
+        wonLeads: 0,
+        followUpsCompleted: 0,
+        quotationsHandled: 0,
+        siteVisitsCoordinated: 0,
+      };
+      byDate.set(date, created);
+      return created;
+    };
+
+    for (const row of activityRows) {
+      const day = ensure(getDay(row.createdAt));
+      if (["CALL_OUTCOME", "ARCHIVED", "WON_MARKED", "FOLLOW_UP_SCHEDULED", "LEAD_TRANSFERRED"].includes(row.type)) {
+        day.leadsHandled += 1;
+      }
+      if (row.type === "LEAD_TRANSFERRED") {
+        day.assists += 1;
+      }
+      if (row.type === "WON_MARKED" || row.newStage === "CAPTURED_WON") {
+        day.wonLeads += 1;
+      }
+      if (row.summary?.toLowerCase().includes("quotation saved")) {
+        day.quotationsHandled += 1;
+      }
+      if (row.summary?.toLowerCase().includes("site visit")) {
+        day.siteVisitsCoordinated += 1;
+      }
+    }
+
+    for (const followUp of completedFollowUps) {
+      if (followUp.completedAt) {
+        ensure(getDay(followUp.completedAt)).followUpsCompleted += 1;
+      }
+    }
+
+    return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
   }
 
   async listNotifications(dataScope: DataScope, userId: string): Promise<NotificationSummary[]> {
@@ -483,9 +1247,8 @@ export class AuthService {
   private async syncJwtUser(requestUser: RequestUser): Promise<SessionUser> {
     const authSubject = requestUser.authSubject ?? requestUser.id;
     const email = requestUser.email?.toLowerCase() ?? null;
-    const role = requestUser.role;
-    const roleRecord = await this.ensureRole(role);
     const now = new Date();
+    const fallbackRoleRecord = await this.ensureRole(requestUser.role);
 
     const user = await this.prisma.$transaction(async (tx) => {
       const existingBySubject = await tx.user.findUnique({
@@ -535,30 +1298,33 @@ export class AuthService {
           await tx.userRole.create({
             data: {
               userId: savedUser.id,
-              roleId: roleRecord.id,
+              roleId: fallbackRoleRecord.id,
               createdAt: now,
             },
           });
           return {
             ...savedUser,
-            roles: [{ role: roleRecord }],
+            roles: [{ role: fallbackRoleRecord }],
           } satisfies DbUserWithRoles;
         }
 
         return savedUser;
       }
 
+      if (requestUser.role !== "FOUNDER") {
+        throw new AuthWorkflowError("This email is not added as a CI4U staff member.", "USER_NOT_INVITED");
+      }
+
       const created = await tx.user.create({
         data: {
-          id: authSubject,
           authProvider: "supabase",
           authSubject,
           name: requestUser.name,
           email,
-          postTitle: defaultPostTitle(role),
-          roleTags: defaultRoleTags(role),
-          permissionCodes: defaultPermissions(role),
-          authorityStage: defaultAuthorityStage(role),
+          postTitle: defaultPostTitle("FOUNDER"),
+          roleTags: defaultRoleTags("FOUNDER"),
+          permissionCodes: defaultPermissions("FOUNDER"),
+          authorityStage: defaultAuthorityStage("FOUNDER"),
           dataScope: toDbDataScope(requestUser.dataScope),
           status: "ACTIVE",
           createdAt: now,
@@ -570,14 +1336,14 @@ export class AuthService {
       await tx.userRole.create({
         data: {
           userId: created.id,
-          roleId: roleRecord.id,
+          roleId: fallbackRoleRecord.id,
           createdAt: now,
         },
       });
 
       return {
         ...created,
-        roles: [{ role: roleRecord }],
+        roles: [{ role: fallbackRoleRecord }],
       } satisfies DbUserWithRoles;
     });
 
@@ -790,6 +1556,64 @@ function toNotificationSummary(notification: DbNotification): NotificationSummar
     relatedId: notification.relatedId,
     read: notification.read,
     createdAt: notification.createdAt,
+  };
+}
+
+function provisioningForUser(user: Pick<DbUser, "authSubject" | "status">): ManagedUser["authProvisioning"] {
+  if (!user.authSubject) {
+    return "LOCAL_ONLY";
+  }
+
+  return user.status === "INVITED" ? "SUPABASE_INVITED" : "SYNCED_LOGIN";
+}
+
+function resolvePerformanceRange(input: StaffPerformanceRangeInput, now: Date): { from: Date; to: Date } {
+  const to = input.to ? parseRangeDate(input.to, "to") : now;
+  const from = input.from ? parseRangeDate(input.from, "from") : new Date(to.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+  if (from > to) {
+    throw new AuthWorkflowError("Performance start date cannot be after end date.", "INVALID_DATE_RANGE");
+  }
+
+  return { from, to };
+}
+
+function parseRangeDate(value: string, label: "from" | "to"): Date {
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    throw new AuthWorkflowError(`Performance ${label} date is invalid.`, "INVALID_DATE_RANGE");
+  }
+
+  return parsed;
+}
+
+function startOfDay(date: Date): Date {
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
+function startOfWeek(date: Date): Date {
+  const start = startOfDay(date);
+  const day = start.getDay();
+  const diff = day === 0 ? 6 : day - 1;
+  start.setDate(start.getDate() - diff);
+  return start;
+}
+
+function startOfMonth(date: Date): Date {
+  const start = startOfDay(date);
+  start.setDate(1);
+  return start;
+}
+
+function toQuickRange(summary: StaffPerformanceSummary): StaffPerformanceQuickRange {
+  return {
+    leadsHandled: summary.leadsHandled,
+    assists: summary.assists,
+    wonLeads: summary.wonLeads,
+    followUpsCompleted: summary.followUpsCompleted,
   };
 }
 

@@ -32,6 +32,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   apiGet,
   apiPost,
+  apiPatch,
   apiDelete,
   type AccessOptions,
   type AssignableUser,
@@ -58,6 +59,8 @@ import {
   type SaveCallOutcomeInput,
   type SessionUser,
   type TransferLeadInput,
+  type StaffLeaderboards,
+  type UpdateManagedUserInput,
   type UserMetrics,
   type VendorSummary,
   type VendorTeamMemberInput,
@@ -795,7 +798,7 @@ export function Ci4uBrainsApp() {
               />
             ) : null}
             {activeView === "vendors" ? <VendorsWorkspace session={session} /> : null}
-            {activeView === "users" ? <UserManagementWorkspace session={session} onUsersChanged={() => void loadNotifications(session)} /> : null}
+            {activeView === "users" ? <UserManagementWorkspaceV2 session={session} onUsersChanged={() => void loadNotifications(session)} /> : null}
             {activeView === "lead-detail" && selectedLead ? (
               <LeadDetailWorkspaceV2
                 key={selectedLead.id}
@@ -1628,6 +1631,7 @@ const staffRoleOptions: Array<{ value: DevRole; label: string }> = [
   { value: "VIEWER", label: "Viewer" },
 ];
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSession; onUsersChanged: () => void }) {
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [accessOptions, setAccessOptions] = useState<AccessOptions | null>(null);
@@ -1933,6 +1937,486 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
                           </button>
                         ) : null}
                         {!canInspectUser && !canDeactivateUser ? <span className="text-xs text-slate-500">Above your authority</span> : null}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+              {!users.length ? (
+                <tr>
+                  <td className="px-4 py-8 text-center text-slate-400" colSpan={8}>
+                    No staff users found yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </Panel>
+  );
+}
+
+function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSession; onUsersChanged: () => void }) {
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [accessOptions, setAccessOptions] = useState<AccessOptions | null>(null);
+  const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<DevRole>("SALES_EXECUTIVE");
+  const [postTitle, setPostTitle] = useState(defaultPostTitleForRole("SALES_EXECUTIVE"));
+  const [roleTagsText, setRoleTagsText] = useState(defaultTagsForRole("SALES_EXECUTIVE").join(", "));
+  const [selectedPermissions, setSelectedPermissions] = useState<PermissionCode[]>(defaultPermissionsForRole("SALES_EXECUTIVE"));
+  const [authorityStage, setAuthorityStage] = useState(String(defaultStageForRole("SALES_EXECUTIVE")));
+  const [temporaryPassword, setTemporaryPassword] = useState("");
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [savingUser, setSavingUser] = useState(false);
+  const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
+  const [metrics, setMetrics] = useState<UserMetrics | null>(null);
+  const [loadingMetricsUserId, setLoadingMetricsUserId] = useState<string | null>(null);
+  const [leaderboards, setLeaderboards] = useState<StaffLeaderboards | null>(null);
+  const [loadingLeaderboards, setLoadingLeaderboards] = useState(false);
+  const [metricFrom, setMetricFrom] = useState(() => dateInputFromDaysAgo(30));
+  const [metricTo, setMetricTo] = useState(() => todayDateInput());
+  const [message, setMessage] = useState<{ tone: "success" | "warning" | "danger"; title: string; message: string } | null>(null);
+
+  const loadUsers = useCallback(async () => {
+    setLoadingUsers(true);
+    setMessage(null);
+
+    try {
+      const [loadedUsers, loadedOptions] = await Promise.all([apiGet<ManagedUser[]>("/auth/users", session), apiGet<AccessOptions>("/auth/access-options", session)]);
+      setUsers(loadedUsers);
+      setAccessOptions(loadedOptions);
+    } catch (error) {
+      setMessage({ tone: "danger", title: "Users blocked", message: error instanceof Error ? error.message : "Could not load users." });
+    } finally {
+      setLoadingUsers(false);
+    }
+  }, [session]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadUsers();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [loadUsers]);
+
+  const roleOptions =
+    accessOptions?.roles ??
+    staffRoleOptions.map((option) => ({
+      value: option.value,
+      label: option.label,
+      defaultPostTitle: defaultPostTitleForRole(option.value),
+      defaultRoleTags: defaultTagsForRole(option.value),
+      defaultAuthorityStage: defaultStageForRole(option.value),
+      defaultPermissions: defaultPermissionsForRole(option.value),
+    }));
+  const permissionOptions = accessOptions?.permissions ?? allPermissionCodes.map((value) => ({ value, label: formatEnum(value) }));
+  const canDeactivateUsers = hasPermission(session, "DELETE_USERS");
+  const canManageUsers = hasPermission(session, "ADD_USERS");
+  const canViewMetrics = hasPermission(session, "SUPERVISOR");
+  const sessionAuthorityStage = session.authorityStage ?? defaultStageForRole(session.role);
+  const isEditing = Boolean(editingUser);
+
+  function changeRole(nextRole: DevRole) {
+    setRole(nextRole);
+    const option = roleOptions.find((entry) => entry.value === nextRole);
+    setPostTitle(option?.defaultPostTitle ?? defaultPostTitleForRole(nextRole));
+    setRoleTagsText((option?.defaultRoleTags ?? defaultTagsForRole(nextRole)).join(", "));
+    setSelectedPermissions(option?.defaultPermissions ?? defaultPermissionsForRole(nextRole));
+    setAuthorityStage(String(option?.defaultAuthorityStage ?? defaultStageForRole(nextRole)));
+  }
+
+  function togglePermission(permission: PermissionCode) {
+    setSelectedPermissions((current) =>
+      current.includes(permission) ? current.filter((entry) => entry !== permission) : [...current, permission],
+    );
+  }
+
+  function resetStaffForm() {
+    setEditingUser(null);
+    setName("");
+    setEmail("");
+    setTemporaryPassword("");
+    changeRole("SALES_EXECUTIVE");
+  }
+
+  function startEditUser(user: ManagedUser) {
+    setEditingUser(user);
+    setName(user.name);
+    setEmail(user.email ?? "");
+    setRole(user.role);
+    setPostTitle(user.postTitle ?? defaultPostTitleForRole(user.role));
+    setRoleTagsText(user.roleTags.join(", "));
+    setSelectedPermissions(user.permissions);
+    setAuthorityStage(String(user.authorityStage));
+    setTemporaryPassword("");
+    setMessage(null);
+  }
+
+  async function saveUser() {
+    setSavingUser(true);
+    setMessage(null);
+
+    const basePayload = {
+      name,
+      role,
+      postTitle,
+      roleTags: roleTagsText
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+      permissions: selectedPermissions,
+      authorityStage: Number(authorityStage || defaultStageForRole(role)),
+      ...(temporaryPassword ? { temporaryPassword } : {}),
+    };
+
+    try {
+      const saved = editingUser
+        ? await apiPatch<ManagedUser>(`/auth/users/${editingUser.id}`, session, basePayload satisfies UpdateManagedUserInput)
+        : await apiPost<ManagedUser>("/auth/users", session, { ...basePayload, email } satisfies CreateManagedUserInput);
+      setUsers((current) => [saved, ...current.filter((user) => user.id !== saved.id)]);
+      const wasEditing = Boolean(editingUser);
+      resetStaffForm();
+      onUsersChanged();
+      setMessage({
+        tone: saved.authProvisioning === "LOCAL_ONLY" ? "warning" : "success",
+        title: wasEditing ? "Staff access updated" : "Staff access created",
+        message: provisioningMessage(saved),
+      });
+    } catch (error) {
+      setMessage({ tone: "danger", title: "User not saved", message: error instanceof Error ? error.message : "Could not save user." });
+    } finally {
+      setSavingUser(false);
+    }
+  }
+
+  async function deactivateUser(user: ManagedUser) {
+    setDeletingUserId(user.id);
+    setMessage(null);
+
+    try {
+      const updated = await apiDelete<ManagedUser>(`/auth/users/${user.id}`, session);
+      setUsers((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
+      setMessage({ tone: "success", title: "Access removed", message: `${user.name} can no longer log in or use CI4U actions.` });
+      onUsersChanged();
+    } catch (error) {
+      setMessage({ tone: "danger", title: "Access not removed", message: error instanceof Error ? error.message : "Could not remove staff access." });
+    } finally {
+      setDeletingUserId(null);
+    }
+  }
+
+  async function openMetrics(user: ManagedUser) {
+    setLoadingMetricsUserId(user.id);
+    setMessage(null);
+
+    try {
+      setMetrics(await apiGet<UserMetrics>(`/auth/users/${user.id}/metrics${dateRangeQuery(metricFrom, metricTo)}`, session));
+    } catch (error) {
+      setMessage({ tone: "danger", title: "Metrics blocked", message: error instanceof Error ? error.message : "Could not load staff metrics." });
+    } finally {
+      setLoadingMetricsUserId(null);
+    }
+  }
+
+  async function loadLeaderboards() {
+    setLoadingLeaderboards(true);
+    setMessage(null);
+
+    try {
+      setLeaderboards(await apiGet<StaffLeaderboards>(`/auth/leaderboards${dateRangeQuery(metricFrom, metricTo)}`, session));
+    } catch (error) {
+      setMessage({ tone: "danger", title: "Leaderboards blocked", message: error instanceof Error ? error.message : "Could not load leaderboards." });
+    } finally {
+      setLoadingLeaderboards(false);
+    }
+  }
+
+  return (
+    <Panel
+      title="User Management"
+      action={
+        <button className="secondary-button" type="button" disabled={loadingUsers} onClick={() => void loadUsers()}>
+          <RefreshCw className={`h-4 w-4 ${loadingUsers ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
+      }
+    >
+      <Notice tone="success" title="Team access" message="Add a staff email, choose the post, tick the allowed work, and set the authority stage. Higher-stage users are protected from lower-stage changes." />
+      {message ? <Notice tone={message.tone} title={message.title} message={message.message} /> : null}
+
+      {canViewMetrics ? (
+        <section className="mt-4 rounded-md border border-white/10 bg-white/[0.03] p-4">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h3 className="font-semibold">Performance Control</h3>
+              <p className="mt-1 text-sm text-slate-300">Use a date range for staff profiles and leaderboards.</p>
+            </div>
+            <div className="flex flex-wrap items-end gap-3">
+              <Field label="From">
+                <input className="field min-w-[150px]" type="date" value={metricFrom} onChange={(event) => setMetricFrom(event.target.value)} />
+              </Field>
+              <Field label="To">
+                <input className="field min-w-[150px]" type="date" value={metricTo} onChange={(event) => setMetricTo(event.target.value)} />
+              </Field>
+              <button className="secondary-button" type="button" disabled={loadingLeaderboards} onClick={() => void loadLeaderboards()}>
+                {loadingLeaderboards ? <Loader2 className="h-4 w-4 animate-spin" /> : <LayoutDashboard className="h-4 w-4" />}
+                Leaderboards
+              </button>
+            </div>
+          </div>
+          {leaderboards ? (
+            <div className="mt-4 grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+              {leaderboards.categories.map((category) => (
+                <div key={category.key} className="rounded-md border border-white/10 bg-black/20 p-3">
+                  <div className="text-sm font-semibold text-cyan-100">{category.label}</div>
+                  <div className="mt-3 space-y-2">
+                    {category.entries.slice(0, 5).map((entry, index) => (
+                      <div key={entry.userId} className="flex items-center justify-between gap-3 rounded-md bg-white/[0.03] px-3 py-2">
+                        <div>
+                          <div className="font-semibold text-slate-100">
+                            {index + 1}. {entry.userName}
+                          </div>
+                          <div className="text-xs text-slate-400">{entry.postTitle ?? formatEnum(entry.role)} | Stage {entry.authorityStage}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-lg font-semibold text-emerald-200">{entry.value}</div>
+                          <div className="text-[11px] text-slate-400">{entry.helper}</div>
+                        </div>
+                      </div>
+                    ))}
+                    {!category.entries.length ? <div className="rounded-md bg-white/[0.03] px-3 py-4 text-sm text-slate-400">No activity in this range.</div> : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      {metrics ? (
+        <section className="mt-4 rounded-md border border-cyan-300/20 bg-cyan-400/10 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="font-semibold">{metrics.userName} work metrics</h3>
+              <p className="mt-1 text-sm text-cyan-100">
+                {metrics.postTitle ?? formatEnum(metrics.role)} | Stage {metrics.authorityStage} | {formatDateTime(metrics.range.from)} to {formatDateTime(metrics.range.to)}
+              </p>
+            </div>
+            <button className="icon-button" type="button" onClick={() => setMetrics(null)}>
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              ["Leads handled", metrics.summary.leadsHandled],
+              ["Won leads", metrics.summary.wonLeads],
+              ["Assists", metrics.summary.assists],
+              ["Conversion", `${metrics.summary.conversionRate}%`],
+              ["Follow-ups done", metrics.summary.followUpsCompleted],
+              ["Missed / delayed", metrics.summary.followUpsMissedOrDelayed],
+              ["Quotations", metrics.summary.quotationsHandled],
+              ["Site visits", metrics.summary.siteVisitsCoordinated],
+              ["Warm handled", metrics.summary.warmLeadHandling],
+              ["Installation", metrics.summary.installationLeadHandling],
+              ["Repair / service", metrics.summary.repairServiceLeadHandling],
+              ["Vendors added", metrics.summary.vendorsCreated],
+              ["Jobs assigned", metrics.summary.jobsAssigned],
+              ["Work started", metrics.summary.workStarted],
+              ["Work completed", metrics.summary.workCompleted],
+              ["Actions", metrics.summary.activeActions],
+            ].map(([label, value]) => (
+              <div key={String(label)} className="rounded-md border border-white/10 bg-black/20 p-3">
+                <div className="text-xs uppercase text-slate-400">{label}</div>
+                <div className="mt-1 text-2xl font-semibold">{value}</div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            {(
+              [
+                ["Today", metrics.quickRanges.today],
+                ["This week", metrics.quickRanges.week],
+                ["This month", metrics.quickRanges.month],
+              ] satisfies Array<[string, UserMetrics["quickRanges"]["today"]]>
+            ).map(([label, summary]) => {
+              return (
+                <div key={String(label)} className="rounded-md border border-white/10 bg-black/20 p-3 text-sm">
+                  <div className="font-semibold text-cyan-100">{label}</div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-slate-300">
+                    <span>Handled: {summary.leadsHandled}</span>
+                    <span>Assists: {summary.assists}</span>
+                    <span>Won: {summary.wonLeads}</span>
+                    <span>Follow-ups: {summary.followUpsCompleted}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {metrics.dailyBreakdown.length ? (
+            <div className="smooth-scroll mt-4 max-h-64 overflow-auto rounded-md border border-white/10">
+              <table className="min-w-full divide-y divide-white/10 text-sm">
+                <thead className="bg-white/[0.04] text-left text-xs uppercase text-slate-400">
+                  <tr>
+                    <th className="px-3 py-2">Date</th>
+                    <th className="px-3 py-2">Handled</th>
+                    <th className="px-3 py-2">Assists</th>
+                    <th className="px-3 py-2">Won</th>
+                    <th className="px-3 py-2">Follow-ups</th>
+                    <th className="px-3 py-2">Quotations</th>
+                    <th className="px-3 py-2">Site visits</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/10">
+                  {metrics.dailyBreakdown.map((day) => (
+                    <tr key={day.date}>
+                      <td className="px-3 py-2">{day.date}</td>
+                      <td className="px-3 py-2">{day.leadsHandled}</td>
+                      <td className="px-3 py-2">{day.assists}</td>
+                      <td className="px-3 py-2">{day.wonLeads}</td>
+                      <td className="px-3 py-2">{day.followUpsCompleted}</td>
+                      <td className="px-3 py-2">{day.quotationsHandled}</td>
+                      <td className="px-3 py-2">{day.siteVisitsCoordinated}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      <section className="mt-4 rounded-md border border-white/10 bg-white/[0.03] p-4">
+        <div className="mb-4 flex items-start gap-3">
+          <UserPlus className="mt-0.5 h-5 w-5 text-cyan-200" />
+          <div>
+            <h3 className="font-semibold">{isEditing ? "Edit Staff ID" : "Add Staff ID"}</h3>
+            <p className="mt-1 text-sm text-slate-300">Default flow sends an email invite. Use a temporary password only when you want to activate the login immediately.</p>
+          </div>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <Field label="Staff Name">
+            <input className="field" value={name} onChange={(event) => setName(event.target.value)} />
+          </Field>
+          <Field label="Email ID">
+            <input className="field" type="email" value={email} disabled={isEditing} onChange={(event) => setEmail(event.target.value)} />
+          </Field>
+          <Field label="Post / Role">
+            <select className="field" value={role} onChange={(event) => changeRole(event.target.value as DevRole)}>
+              {roleOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Post Title">
+            <input className="field" value={postTitle} onChange={(event) => setPostTitle(event.target.value)} placeholder="BDM, Sales Executive, CTO..." />
+          </Field>
+          <Field label="Role Tags">
+            <input className="field" value={roleTagsText} onChange={(event) => setRoleTagsText(event.target.value)} placeholder="BDM, CTO" />
+          </Field>
+          <Field label="Authority Stage">
+            <input className="field" type="number" min={1} max={100} value={authorityStage} onChange={(event) => setAuthorityStage(event.target.value)} />
+          </Field>
+          <Field label="Temporary Password">
+            <input className="field" type="password" value={temporaryPassword} onChange={(event) => setTemporaryPassword(event.target.value)} placeholder="Optional, minimum 8 characters" />
+          </Field>
+        </div>
+        <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3">
+          <div className="text-xs font-semibold uppercase text-slate-400">Permission checklist</div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {permissionOptions.map((permission) => (
+              <label key={permission.value} className="flex items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selectedPermissions.includes(permission.value)}
+                  onChange={() => togglePermission(permission.value)}
+                />
+                <span>{permission.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button className="primary-button" type="button" disabled={savingUser || !canManageUsers || !name.trim() || (!editingUser && !email.trim())} onClick={() => void saveUser()}>
+            {savingUser ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
+            {isEditing ? "Save Staff Access" : "Add Staff"}
+          </button>
+          {editingUser ? (
+            <button className="secondary-button" type="button" disabled={savingUser} onClick={resetStaffForm}>
+              Cancel Edit
+            </button>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="mt-5 rounded-md border border-white/10 bg-white/[0.03] p-4">
+        <h3 className="font-semibold">Staff Accounts</h3>
+        <div className="smooth-scroll mt-4 overflow-auto rounded-md border border-white/10">
+          <table className="min-w-full divide-y divide-white/10 text-sm">
+            <thead className="bg-white/[0.03] text-left text-xs uppercase text-slate-400">
+              <tr>
+                <th className="px-4 py-3">Name</th>
+                <th className="px-4 py-3">Email</th>
+                <th className="px-4 py-3">Role</th>
+                <th className="px-4 py-3">Stage</th>
+                <th className="px-4 py-3">Permissions</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Login</th>
+                <th className="px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/10">
+              {users.map((user) => {
+                const canActOnStage = user.authorityStage <= sessionAuthorityStage;
+                const canInspectUser = canViewMetrics && (user.id === session.userId || canActOnStage);
+                const canEditUser = canManageUsers && user.id !== session.userId && canActOnStage && user.status !== "DEACTIVATED";
+                const canDeactivateUser = canDeactivateUsers && user.id !== session.userId && canActOnStage && user.status !== "DEACTIVATED";
+
+                return (
+                  <tr key={user.id} className="hover:bg-white/[0.03]">
+                    <td className="px-4 py-3">
+                      <div className="font-semibold">{user.name}</div>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {user.postTitle ? <span className="rounded bg-cyan-400/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-cyan-100">{user.postTitle}</span> : null}
+                        {user.roleTags.map((tag) => (
+                          <span key={tag} className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-200">
+                            {tag.replaceAll("_", " ")}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-slate-300">{user.email ?? "-"}</td>
+                    <td className="px-4 py-3 text-cyan-200">{formatEnum(user.role)}</td>
+                    <td className="px-4 py-3">{user.authorityStage}</td>
+                    <td className="max-w-[280px] px-4 py-3 text-xs text-slate-300">{user.permissions.map(formatEnum).join(", ") || "-"}</td>
+                    <td className="px-4 py-3">{formatEnum(user.status)}</td>
+                    <td className="px-4 py-3 text-slate-300">{provisioningLabel(user)}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-2">
+                        {canEditUser ? (
+                          <button className="secondary-button py-1 text-xs" type="button" onClick={() => startEditUser(user)}>
+                            <UserRound className="h-3.5 w-3.5" />
+                            Edit
+                          </button>
+                        ) : null}
+                        {canInspectUser ? (
+                          <button className="secondary-button py-1 text-xs" type="button" disabled={loadingMetricsUserId === user.id} onClick={() => void openMetrics(user)}>
+                            {loadingMetricsUserId === user.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <InfoIcon className="h-3.5 w-3.5" />}
+                            Metrics
+                          </button>
+                        ) : null}
+                        {canDeactivateUser ? (
+                          <button className="secondary-button py-1 text-xs text-red-100" type="button" disabled={deletingUserId === user.id} onClick={() => void deactivateUser(user)}>
+                            {deletingUserId === user.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                            Remove access
+                          </button>
+                        ) : null}
+                        {!canEditUser && !canInspectUser && !canDeactivateUser ? <span className="text-xs text-slate-500">Above your authority</span> : null}
                       </div>
                     </td>
                   </tr>
@@ -3802,6 +4286,59 @@ function toTimeInput(value: string): string {
     return "";
   }
   return date.toTimeString().slice(0, 5);
+}
+
+function todayDateInput(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function dateInputFromDaysAgo(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+function dateRangeQuery(from: string, to: string): string {
+  const params = new URLSearchParams();
+
+  if (from) {
+    params.set("from", `${from}T00:00:00.000Z`);
+  }
+
+  if (to) {
+    params.set("to", `${to}T23:59:59.999Z`);
+  }
+
+  const value = params.toString();
+  return value ? `?${value}` : "";
+}
+
+function provisioningLabel(user: ManagedUser): string {
+  if (user.status === "DEACTIVATED") {
+    return "Access removed";
+  }
+
+  if (user.authProvisioning === "SUPABASE_INVITED") {
+    return "Invite sent";
+  }
+
+  if (user.authProvisioning === "SUPABASE_CREATED" || user.authProvisioning === "SYNCED_LOGIN") {
+    return "Login active";
+  }
+
+  return "Invite pending setup";
+}
+
+function provisioningMessage(user: ManagedUser): string {
+  if (user.authProvisioning === "SUPABASE_INVITED") {
+    return `Invite email sent to ${user.email}. The staff member can set a password from the email link.`;
+  }
+
+  if (user.authProvisioning === "SUPABASE_CREATED" || user.authProvisioning === "SYNCED_LOGIN") {
+    return `${user.email} can log in with ${formatEnum(user.role)} access.`;
+  }
+
+  return "Staff access was saved, but login invite is not connected yet. Add the Supabase service key to the API server, then save this staff member again.";
 }
 
 function formatDateTime(value: string): string {

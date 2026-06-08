@@ -98,6 +98,7 @@ export type VendorSummary = {
 export type CreateVendorRecordInput = Omit<VendorSummary, "id" | "createdAt" | "updatedAt" | "teamMembers"> & {
   teamMembers: VendorTeamMemberInput[];
   now: Date;
+  actorId: string | null;
 };
 
 export type VendorOfferSummary = {

@@ -1,8 +1,8 @@
-import { BadRequestException, Body, Controller, Delete, Get, Inject, Param, Post, Req } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Inject, Param, Patch, Post, Query, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { ZodError } from "zod";
 import type { RequestUser } from "./auth.types";
-import { AuthService, AuthWorkflowError, type CreateUserInput } from "./auth.service";
+import { AuthService, AuthWorkflowError, type CreateUserInput, type StaffPerformanceRangeInput, type UpdateUserInput } from "./auth.service";
 
 @Controller("auth")
 export class AuthController {
@@ -35,11 +35,22 @@ export class AuthController {
   }
 
   @Get("users/:userId/metrics")
-  async getUserMetrics(@Req() req: Request, @Param("userId") userId: string) {
+  async getUserMetrics(@Req() req: Request, @Param("userId") userId: string, @Query() query: StaffPerformanceRangeInput) {
     const user = requireUser(req);
 
     try {
-      return await this.authService.getUserMetrics(user.dataScope, user, userId);
+      return await this.authService.getUserMetrics(user.dataScope, user, userId, query);
+    } catch (error) {
+      throw toBadRequest(error);
+    }
+  }
+
+  @Get("leaderboards")
+  async getLeaderboards(@Req() req: Request, @Query() query: StaffPerformanceRangeInput) {
+    const user = requireUser(req);
+
+    try {
+      return await this.authService.getLeaderboards(user.dataScope, user, query);
     } catch (error) {
       throw toBadRequest(error);
     }
@@ -51,6 +62,17 @@ export class AuthController {
 
     try {
       return await this.authService.createUser(user.dataScope, user, body);
+    } catch (error) {
+      throw toBadRequest(error);
+    }
+  }
+
+  @Patch("users/:userId")
+  async updateUser(@Req() req: Request, @Param("userId") userId: string, @Body() body: UpdateUserInput) {
+    const user = requireUser(req);
+
+    try {
+      return await this.authService.updateUser(user.dataScope, user, userId, body);
     } catch (error) {
       throw toBadRequest(error);
     }

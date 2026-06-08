@@ -61,6 +61,8 @@ export type CreateManagedUserInput = {
   temporaryPassword?: string;
 };
 
+export type UpdateManagedUserInput = Partial<Omit<CreateManagedUserInput, "email">>;
+
 export type AccessOptions = {
   roles: Array<{
     value: DevRole;
@@ -96,6 +98,79 @@ export type UserMetrics = {
   wonLeads: number;
   leadsAssistedHot: number;
   leadsAssistedWon: number;
+  summary: StaffPerformanceSummary;
+  quickRanges: {
+    today: StaffPerformanceQuickRange;
+    week: StaffPerformanceQuickRange;
+    month: StaffPerformanceQuickRange;
+  };
+  dailyBreakdown: StaffDailyPerformance[];
+  range: {
+    from: string;
+    to: string;
+  };
+};
+
+export type StaffPerformanceSummary = {
+  leadsAdded: number;
+  leadsHandled: number;
+  assists: number;
+  leadsAssistedHot: number;
+  leadsAssistedWon: number;
+  wonLeads: number;
+  hotLeadsCaptured: number;
+  completeWonLeads: number;
+  followUpsCompleted: number;
+  followUpsMissedOrDelayed: number;
+  stageMovements: number;
+  quotationsHandled: number;
+  siteVisitsCoordinated: number;
+  warmLeadHandling: number;
+  installationLeadHandling: number;
+  repairServiceLeadHandling: number;
+  capturedProjects: number;
+  whatsappDrafts: number;
+  vendorsCreated: number;
+  jobsCreated: number;
+  jobsAssigned: number;
+  workStarted: number;
+  workCompleted: number;
+  activeActions: number;
+  conversionRate: number;
+};
+
+export type StaffPerformanceQuickRange = Pick<StaffPerformanceSummary, "leadsHandled" | "assists" | "wonLeads" | "followUpsCompleted">;
+
+export type StaffDailyPerformance = {
+  date: string;
+  leadsHandled: number;
+  assists: number;
+  wonLeads: number;
+  followUpsCompleted: number;
+  quotationsHandled: number;
+  siteVisitsCoordinated: number;
+};
+
+export type LeaderboardEntry = {
+  userId: string;
+  userName: string;
+  role: DevRole;
+  postTitle: string | null;
+  authorityStage: number;
+  value: number;
+  helper: string;
+};
+
+export type StaffLeaderboards = {
+  range: {
+    from: string;
+    to: string;
+  };
+  categories: Array<{
+    key: string;
+    label: string;
+    entries: LeaderboardEntry[];
+  }>;
 };
 
 export type TransferLeadInput = {
@@ -493,6 +568,19 @@ export async function apiGet<T>(path: string, session: DevSession): Promise<T> {
 export async function apiPost<T>(path: string, session: DevSession, body: unknown): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...getAuthHeaders(session),
+    },
+    body: JSON.stringify(body),
+  });
+
+  return parseResponse<T>(response);
+}
+
+export async function apiPatch<T>(path: string, session: DevSession, body: unknown): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method: "PATCH",
     headers: {
       "content-type": "application/json",
       ...getAuthHeaders(session),

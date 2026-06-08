@@ -8,6 +8,7 @@ import {
   type JobChecklist as DbJobChecklist,
   type JobEvent as DbJobEvent,
   type JobPhoto as DbJobPhoto,
+  type StaffActivityType as DbStaffActivityType,
   type Vendor as DbVendor,
   type VendorOffer as DbVendorOffer,
   type VendorTeamMember as DbVendorTeamMember,
@@ -117,6 +118,26 @@ export class PrismaOperationsRepository implements OperationsRepository {
       include: { teamMembers: { orderBy: { createdAt: "asc" } } },
     });
 
+    if (input.actorId) {
+      await this.prisma.staffActivityEvent.create({
+        data: {
+          dataScope: toDbDataScope(input.dataScope),
+          userId: input.actorId,
+          type: "VENDOR_CREATED",
+          summary: `Vendor created: ${vendor.vendorName} (${vendor.vendorCode}).`,
+          metadata: {
+            vendorId: vendor.id,
+            vendorCode: vendor.vendorCode,
+            phone: vendor.phone,
+            teamType: vendor.teamType,
+            teamSize: vendor.teamSize,
+          },
+          occurredAt: input.now,
+          createdAt: input.now,
+        },
+      });
+    }
+
     return this.toVendorSummary(vendor as VendorWithTeamMembers);
   }
 
@@ -171,6 +192,26 @@ export class PrismaOperationsRepository implements OperationsRepository {
       },
       include: this.jobInclude(),
     });
+
+    if (input.actorId) {
+      await this.prisma.staffActivityEvent.create({
+        data: {
+          dataScope: toDbDataScope(input.dataScope),
+          userId: input.actorId,
+          leadId: input.lead.id,
+          customerId: input.lead.customerId,
+          jobId: job.id,
+          type: "JOB_CREATED",
+          summary: `Operations job created from won lead ${input.lead.customerName}.`,
+          metadata: {
+            jobType: job.jobType,
+            scheduledAt: job.scheduledAt?.toISOString() ?? null,
+          },
+          occurredAt: input.now,
+          createdAt: input.now,
+        },
+      });
+    }
 
     return this.toJobOperation(job as JobWithRelations);
   }
@@ -260,6 +301,25 @@ export class PrismaOperationsRepository implements OperationsRepository {
           createdAt: input.now,
         },
       });
+
+      await tx.staffActivityEvent.create({
+        data: {
+          dataScope: toDbDataScope(input.dataScope),
+          userId: input.actorId,
+          leadId: job.leadId,
+          customerId: job.customerId,
+          jobId: input.jobId,
+          type: "JOB_ASSIGNED",
+          summary: `Vendor offer sent to ${vendors.length} vendor${vendors.length === 1 ? "" : "s"}.`,
+          metadata: {
+            vendorIds: vendors.map((vendor) => vendor.id),
+            offerPricePaise: input.offerPricePaise,
+          },
+          occurredAt: input.now,
+          createdAt: input.now,
+        },
+      });
+
     });
 
     const updated = await this.getJobById(input.dataScope, input.jobId);
@@ -310,6 +370,7 @@ export class PrismaOperationsRepository implements OperationsRepository {
           createdAt: input.now,
         },
       });
+
     });
 
     return this.requireUpdatedJob(input.dataScope, input.jobId, "photo");
@@ -492,6 +553,30 @@ export class PrismaOperationsRepository implements OperationsRepository {
           createdAt: input.now,
         },
       });
+
+      const staffActivityType = staffActivityTypeForJobTransition(input.eventType);
+
+      if (staffActivityType) {
+        await tx.staffActivityEvent.create({
+          data: {
+            dataScope: toDbDataScope(input.dataScope),
+            userId: input.actorId,
+            leadId: job.leadId,
+            customerId: job.customerId,
+            jobId: input.jobId,
+            type: staffActivityType,
+            summary: input.summary,
+            metadata: {
+              oldStatus: job.status,
+              newStatus: input.nextStatus,
+              vendorBonusPaise: input.vendorBonusPaise ?? 0,
+              vendorDeductionPaise: input.vendorDeductionPaise ?? 0,
+            },
+            occurredAt: input.now,
+            createdAt: input.now,
+          },
+        });
+      }
     });
 
     const updated = await this.getJobById(input.dataScope, input.jobId);
@@ -689,4 +774,16 @@ function toDbDataScope(dataScope: DataScope): DbDataScope {
 
 function toAppDataScope(dataScope: DbDataScope): DataScope {
   return dataScope === DbDataScope.PRODUCTION ? "production" : "development";
+}
+
+function staffActivityTypeForJobTransition(eventType: JobEventSummary["type"]): DbStaffActivityType | null {
+  if (eventType === "WORK_STARTED" || eventType === "WORK_RESUMED") {
+    return "WORK_STARTED";
+  }
+
+  if (eventType === "WORK_COMPLETED" || eventType === "JOB_CLOSED") {
+    return "WORK_COMPLETED";
+  }
+
+  return null;
 }

@@ -14,17 +14,21 @@ export class LeadsController {
   ) {}
 
   @Get("raw")
-  listRawLeads(@Req() req: Request) {
-    return this.leadIntakeService.listRawLeads(requireDataScope(req));
+  async listRawLeads(@Req() req: Request) {
+    const actor = await this.requireActor(req);
+    this.authService.assertPermission(actor, "WORK_ON_LEADS");
+    return this.leadIntakeService.listRawLeads(actor.dataScope);
   }
 
   @Get("counts")
-  getQueueCounts(@Req() req: Request) {
-    return this.leadIntakeService.getQueueCounts(requireDataScope(req));
+  async getQueueCounts(@Req() req: Request) {
+    const actor = await this.requireActor(req);
+    this.authService.assertPermission(actor, "WORK_ON_LEADS");
+    return this.leadIntakeService.getQueueCounts(actor.dataScope);
   }
 
   @Get("queue/:queue")
-  listQueue(@Req() req: Request, @Param("queue") queue: LeadQueue) {
+  async listQueue(@Req() req: Request, @Param("queue") queue: LeadQueue) {
     if (!["RAW", "WARM", "HOT_INSTALLATION", "HOT_REPAIR_SERVICE", "UNANSWERED", "GHOSTING", "WON", "LOST", "ARCHIVE"].includes(queue)) {
       throw new BadRequestException({
         code: "INVALID_QUEUE",
@@ -32,12 +36,16 @@ export class LeadsController {
       });
     }
 
-    return this.leadIntakeService.listLeadsByQueue(requireDataScope(req), queue);
+    const actor = await this.requireActor(req);
+    this.authService.assertPermission(actor, "WORK_ON_LEADS");
+    return this.leadIntakeService.listLeadsByQueue(actor.dataScope, queue);
   }
 
   @Get(":leadId")
   async getLeadDetail(@Req() req: Request, @Param("leadId") leadId: string) {
-    const lead = await this.leadIntakeService.getLeadDetail(requireDataScope(req), leadId);
+    const actor = await this.requireActor(req);
+    this.authService.assertPermission(actor, "WORK_ON_LEADS");
+    const lead = await this.leadIntakeService.getLeadDetail(actor.dataScope, leadId);
 
     if (!lead) {
       throw new NotFoundException({
@@ -172,15 +180,4 @@ function requireUser(req: Request) {
   }
 
   return req.user;
-}
-
-function requireDataScope(req: Request) {
-  if (!req.user?.dataScope) {
-    throw new BadRequestException({
-      code: "DATA_SCOPE_REQUIRED",
-      message: "Authenticated data scope is required for lead operations.",
-    });
-  }
-
-  return req.user.dataScope;
 }

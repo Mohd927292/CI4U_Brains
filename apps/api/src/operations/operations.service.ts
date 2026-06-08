@@ -116,7 +116,7 @@ export class OperationsService {
     return this.operationsRepository.listVendors(dataScope);
   }
 
-  async createVendor(dataScope: DataScope, input: CreateVendorInput): Promise<VendorSummary> {
+  async createVendor(dataScope: DataScope, input: CreateVendorInput, actorId: string | null = null): Promise<VendorSummary> {
     const parsed = createVendorSchema.parse(input);
     const phone = normalizeIndianMobilePhone(parsed.phone);
 
@@ -170,6 +170,7 @@ export class OperationsService {
         active: true,
         teamMembers: parsed.teamType === "TEAM" ? normalizedMembers : [],
         now,
+        actorId,
       });
     } catch (error) {
       if (error instanceof DuplicateVendorPhoneError) {
