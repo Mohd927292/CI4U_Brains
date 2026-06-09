@@ -48,7 +48,7 @@ function createCorsMiddleware(allowedOrigins: string[]) {
       "Access-Control-Allow-Headers",
       "authorization,content-type,x-ci4u-data-scope,x-ci4u-dev-user-id,x-ci4u-dev-user-name,x-ci4u-dev-role",
     );
-    res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
 
     if (req.method === "OPTIONS") {
       res.status(204).send();
