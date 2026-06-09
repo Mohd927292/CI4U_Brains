@@ -861,33 +861,9 @@ function AccessLogin({
     }
   }
 
-  async function sendPasswordReset() {
-    const supabase = getSupabaseBrowserClient();
-
-    if (!supabase) {
-      setError("Production login is not configured. Set Supabase browser environment variables first.");
-      return;
-    }
-
-    setBusy(true);
+  function sendPasswordReset() {
     setError(null);
-    setResetMessage(null);
-
-    try {
-      const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-        redirectTo: window.location.origin,
-      });
-
-      if (resetError) {
-        throw resetError;
-      }
-
-      setResetMessage("Password reset email sent. Open the email, complete Supabase verification, then return here.");
-    } catch (resetError) {
-      setError(resetError instanceof Error ? resetError.message : "Could not send reset email.");
-    } finally {
-      setBusy(false);
-    }
+    setResetMessage("Ask a Founder, Co-Founder, or authorized admin to open User Management, edit your staff ID, and set a temporary password. Email reset links are disabled until Supabase Auth URLs are fixed.");
   }
 
   if (productionMode) {
@@ -904,7 +880,7 @@ function AccessLogin({
             </div>
           </div>
           {error ? <Notice tone="danger" title="Login blocked" message={error} /> : null}
-          {resetMessage ? <Notice tone="success" title="Reset email sent" message={resetMessage} /> : null}
+          {resetMessage ? <Notice tone="warning" title="Password reset by admin" message={resetMessage} /> : null}
           <div className="grid gap-4">
             <Field label="Email">
               <input className="field" type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
@@ -921,7 +897,7 @@ function AccessLogin({
               Login
             </button>
             <button className="secondary-button w-full" type="button" disabled={busy || !email.trim()} onClick={() => void sendPasswordReset()}>
-              Send password reset email
+              Need password reset
             </button>
           </div>
         </section>
