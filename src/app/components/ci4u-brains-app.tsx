@@ -38,6 +38,7 @@ import {
   type AssignableUser,
   type ChecklistItem,
   type CreateManagedUserInput,
+  type DeactivateManagedUserInput,
   type CreateVendorInput,
   type CreateLeadResponse,
   type DevRole,
@@ -1972,6 +1973,8 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [savingUser, setSavingUser] = useState(false);
   const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
+  const [deactivationTarget, setDeactivationTarget] = useState<ManagedUser | null>(null);
+  const [deactivationPassword, setDeactivationPassword] = useState("");
   const [metrics, setMetrics] = useState<UserMetrics | null>(null);
   const [loadingMetricsUserId, setLoadingMetricsUserId] = useState<string | null>(null);
   const [leaderboards, setLeaderboards] = useState<StaffLeaderboards | null>(null);
@@ -2019,6 +2022,7 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
   const canViewMetrics = hasPermission(session, "SUPERVISOR");
   const sessionAuthorityStage = session.authorityStage ?? defaultStageForRole(session.role);
   const isEditing = Boolean(editingUser);
+  const passwordRequiredForSave = !editingUser || !editingUser.authSubject;
 
   function changeRole(nextRole: DevRole) {
     setRole(nextRole);
@@ -2056,7 +2060,20 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
     setMessage(null);
   }
 
+  function generateStaffPassword() {
+    setTemporaryPassword(makeTemporaryPassword());
+  }
+
   async function saveUser() {
+    if (passwordRequiredForSave && temporaryPassword.trim().length < 8) {
+      setMessage({
+        tone: "warning",
+        title: "Temporary password required",
+        message: "Set a temporary password with at least 8 characters. The staff member can change it after first login.",
+      });
+      return;
+    }
+
     setSavingUser(true);
     setMessage(null);
 
@@ -2093,14 +2110,36 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
     }
   }
 
-  async function deactivateUser(user: ManagedUser) {
-    setDeletingUserId(user.id);
+  function requestDeactivateUser(user: ManagedUser) {
+    setDeactivationTarget(user);
+    setDeactivationPassword("");
+    setMessage(null);
+  }
+
+  function cancelDeactivateUser() {
+    setDeactivationTarget(null);
+    setDeactivationPassword("");
+  }
+
+  async function deactivateUser() {
+    if (!deactivationTarget) {
+      return;
+    }
+
+    if (!deactivationPassword) {
+      setMessage({ tone: "warning", title: "Password required", message: "Enter your own CI4U login password to remove staff access." });
+      return;
+    }
+
+    setDeletingUserId(deactivationTarget.id);
     setMessage(null);
 
     try {
-      const updated = await apiDelete<ManagedUser>(`/auth/users/${user.id}`, session);
+      const payload: DeactivateManagedUserInput = { actorPassword: deactivationPassword };
+      const updated = await apiDelete<ManagedUser>(`/auth/users/${deactivationTarget.id}`, session, payload);
       setUsers((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
-      setMessage({ tone: "success", title: "Access removed", message: `${user.name} can no longer log in or use CI4U actions.` });
+      setMessage({ tone: "success", title: "Access removed", message: `${deactivationTarget.name} can no longer log in or use CI4U actions.` });
+      cancelDeactivateUser();
       onUsersChanged();
     } catch (error) {
       setMessage({ tone: "danger", title: "Access not removed", message: error instanceof Error ? error.message : "Could not remove staff access." });
@@ -2145,8 +2184,50 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
         </button>
       }
     >
-      <Notice tone="success" title="Team access" message="Add a staff email, choose the post, tick the allowed work, and set the authority stage. Higher-stage users are protected from lower-stage changes." />
+      <Notice
+        tone="success"
+        title="Team access"
+        message="Add a staff email, set a temporary password, choose the post, tick the allowed work, and set the authority stage. Higher-stage users are protected from lower-stage changes."
+      />
       {message ? <Notice tone={message.tone} title={message.title} message={message.message} /> : null}
+
+      {deactivationTarget ? (
+        <section className="mt-4 rounded-md border border-red-300/30 bg-red-500/10 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="font-semibold text-red-50">Confirm Access Removal</h3>
+              <p className="mt-1 text-sm text-red-100">
+                You are removing login access for {deactivationTarget.name}. Confirm with your own CI4U password; this keeps customer and activity history intact.
+              </p>
+            </div>
+            <button className="icon-button" type="button" onClick={cancelDeactivateUser}>
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="mt-4 flex flex-wrap items-end gap-3">
+            <Field label="Your Password">
+              <input
+                className="field min-w-[260px]"
+                type="password"
+                value={deactivationPassword}
+                onChange={(event) => setDeactivationPassword(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    void deactivateUser();
+                  }
+                }}
+              />
+            </Field>
+            <button className="secondary-button text-red-100" type="button" disabled={deletingUserId === deactivationTarget.id || !deactivationPassword} onClick={() => void deactivateUser()}>
+              {deletingUserId === deactivationTarget.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
+              Remove Access
+            </button>
+            <button className="secondary-button" type="button" disabled={deletingUserId === deactivationTarget.id} onClick={cancelDeactivateUser}>
+              Cancel
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {canViewMetrics ? (
         <section className="mt-4 rounded-md border border-white/10 bg-white/[0.03] p-4">
@@ -2294,7 +2375,7 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
           <UserPlus className="mt-0.5 h-5 w-5 text-cyan-200" />
           <div>
             <h3 className="font-semibold">{isEditing ? "Edit Staff ID" : "Add Staff ID"}</h3>
-            <p className="mt-1 text-sm text-slate-300">Default flow sends an email invite. Use a temporary password only when you want to activate the login immediately.</p>
+            <p className="mt-1 text-sm text-slate-300">Temporary password activation is the current production-safe flow. Staff can change the password after login.</p>
           </div>
         </div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -2322,8 +2403,19 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
           <Field label="Authority Stage">
             <input className="field" type="number" min={1} max={100} value={authorityStage} onChange={(event) => setAuthorityStage(event.target.value)} />
           </Field>
-          <Field label="Temporary Password">
-            <input className="field" type="password" value={temporaryPassword} onChange={(event) => setTemporaryPassword(event.target.value)} placeholder="Optional, minimum 8 characters" />
+          <Field label={passwordRequiredForSave ? "Temporary Password *" : "Reset Password"}>
+            <div className="flex gap-2">
+              <input
+                className="field"
+                type="password"
+                value={temporaryPassword}
+                onChange={(event) => setTemporaryPassword(event.target.value)}
+                placeholder={passwordRequiredForSave ? "Required, minimum 8 characters" : "Optional password reset"}
+              />
+              <button className="secondary-button shrink-0 px-3" type="button" onClick={generateStaffPassword}>
+                Generate
+              </button>
+            </div>
           </Field>
         </div>
         <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3">
@@ -2342,7 +2434,12 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
           </div>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
-          <button className="primary-button" type="button" disabled={savingUser || !canManageUsers || !name.trim() || (!editingUser && !email.trim())} onClick={() => void saveUser()}>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={savingUser || !canManageUsers || !name.trim() || (!editingUser && !email.trim()) || (passwordRequiredForSave && temporaryPassword.trim().length < 8)}
+            onClick={() => void saveUser()}
+          >
             {savingUser ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
             {isEditing ? "Save Staff Access" : "Add Staff"}
           </button>
@@ -2411,7 +2508,7 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
                           </button>
                         ) : null}
                         {canDeactivateUser ? (
-                          <button className="secondary-button py-1 text-xs text-red-100" type="button" disabled={deletingUserId === user.id} onClick={() => void deactivateUser(user)}>
+                          <button className="secondary-button py-1 text-xs text-red-100" type="button" disabled={deletingUserId === user.id} onClick={() => requestDeactivateUser(user)}>
                             {deletingUserId === user.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
                             Remove access
                           </button>
@@ -4352,6 +4449,15 @@ function paiseToRs(value: number): number {
 
 function makeUiId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function makeTemporaryPassword(): string {
+  const randomPart =
+    typeof crypto !== "undefined" && "getRandomValues" in crypto
+      ? Array.from(crypto.getRandomValues(new Uint32Array(2)), (value) => value.toString(36)).join("")
+      : Math.random().toString(36).slice(2, 14);
+
+  return `Ci4U#${randomPart.slice(0, 10)}9`;
 }
 
 function makeQuotationItem(): UiQuotationItem {

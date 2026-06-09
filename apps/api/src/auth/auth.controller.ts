@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Delete, Get, Inject, Param, Patc
 import type { Request } from "express";
 import { ZodError } from "zod";
 import type { RequestUser } from "./auth.types";
-import { AuthService, AuthWorkflowError, type CreateUserInput, type StaffPerformanceRangeInput, type UpdateUserInput } from "./auth.service";
+import { AuthService, AuthWorkflowError, type CreateUserInput, type DeactivateUserInput, type StaffPerformanceRangeInput, type UpdateUserInput } from "./auth.service";
 
 @Controller("auth")
 export class AuthController {
@@ -79,11 +79,11 @@ export class AuthController {
   }
 
   @Delete("users/:userId")
-  async deactivateUser(@Req() req: Request, @Param("userId") userId: string) {
+  async deactivateUser(@Req() req: Request, @Param("userId") userId: string, @Body() body: DeactivateUserInput) {
     const user = requireUser(req);
 
     try {
-      return await this.authService.deactivateUser(user.dataScope, user, userId);
+      return await this.authService.deactivateUser(user.dataScope, user, userId, body);
     } catch (error) {
       throw toBadRequest(error);
     }

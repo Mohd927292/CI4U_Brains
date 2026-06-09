@@ -63,6 +63,10 @@ export type CreateManagedUserInput = {
 
 export type UpdateManagedUserInput = Partial<Omit<CreateManagedUserInput, "email">>;
 
+export type DeactivateManagedUserInput = {
+  actorPassword: string;
+};
+
 export type AccessOptions = {
   roles: Array<{
     value: DevRole;
@@ -591,10 +595,16 @@ export async function apiPatch<T>(path: string, session: DevSession, body: unkno
   return parseResponse<T>(response);
 }
 
-export async function apiDelete<T>(path: string, session: DevSession): Promise<T> {
+export async function apiDelete<T>(path: string, session: DevSession, body?: unknown): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     method: "DELETE",
-    headers: getAuthHeaders(session),
+    headers: body
+      ? {
+          "content-type": "application/json",
+          ...getAuthHeaders(session),
+        }
+      : getAuthHeaders(session),
+    ...(body ? { body: JSON.stringify(body) } : {}),
   });
 
   return parseResponse<T>(response);

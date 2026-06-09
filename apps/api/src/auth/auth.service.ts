@@ -73,6 +73,10 @@ const userCreateSchema = z.object({
 export type CreateUserInput = z.input<typeof userCreateSchema>;
 const userUpdateSchema = userCreateSchema.omit({ email: true }).partial();
 export type UpdateUserInput = z.input<typeof userUpdateSchema>;
+const userDeactivateSchema = z.object({
+  actorPassword: z.string().min(1, "Confirm your password before removing staff access."),
+});
+export type DeactivateUserInput = z.input<typeof userDeactivateSchema>;
 
 export type SessionUser = {
   id: string;
@@ -315,6 +319,7 @@ export class AuthService {
     const now = new Date();
     const roleRecord = await this.ensureRole(role);
     const adminClient = this.getSupabaseAdminClient();
+    const emailInvitesEnabled = this.emailInvitesEnabled();
     const postTitle = parsed.postTitle?.trim() || defaultPostTitle(role);
     const roleTags = uniqueStrings(parsed.roleTags.length ? parsed.roleTags : defaultRoleTags(role));
     const permissions = uniquePermissions(parsed.permissions.length ? parsed.permissions : defaultPermissions(role));
@@ -329,6 +334,13 @@ export class AuthService {
       );
     }
 
+    if (dataScope === "production" && !parsed.temporaryPassword && !emailInvitesEnabled) {
+      throw new AuthWorkflowError(
+        "Set a temporary password for this staff member. Email invite links are disabled until the Supabase redirect URL is fixed.",
+        "TEMPORARY_PASSWORD_REQUIRED",
+      );
+    }
+
     let authSubject: string | null = null;
     let provisioning: ManagedUser["authProvisioning"] = "LOCAL_ONLY";
 
@@ -337,21 +349,14 @@ export class AuthService {
       const userMetadata = { name: parsed.name, postTitle, roleTags };
 
       if (parsed.temporaryPassword) {
-        const { data, error } = await adminClient.auth.admin.createUser({
+        authSubject = await this.createOrUpdateSupabasePasswordUser(adminClient, {
           email,
           password: parsed.temporaryPassword,
-          email_confirm: true,
-          app_metadata: appMetadata,
-          user_metadata: userMetadata,
+          appMetadata,
+          userMetadata,
         });
-
-        if (error) {
-          throw new AuthWorkflowError(error.message, "SUPABASE_USER_CREATE_FAILED");
-        }
-
-        authSubject = data.user?.id ?? null;
         provisioning = "SUPABASE_CREATED";
-      } else {
+      } else if (emailInvitesEnabled) {
         const redirectTo = process.env.CI4U_AUTH_INVITE_REDIRECT_URL;
         const { data, error } = await adminClient.auth.admin.inviteUserByEmail(email, {
           data: userMetadata,
@@ -540,6 +545,7 @@ export class AuthService {
     this.requireStage(actorProfile, authorityStage, "set this user's authority stage");
 
     const adminClient = this.getSupabaseAdminClient();
+    const emailInvitesEnabled = this.emailInvitesEnabled();
     let authSubject = target.authSubject;
     let authProvider = target.authProvider;
     let provisioning: ManagedUser["authProvisioning"] = provisioningForUser(target);
@@ -561,23 +567,16 @@ export class AuthService {
           throw new AuthWorkflowError("This staff record has no email, so login cannot be created.", "STAFF_EMAIL_REQUIRED");
         }
 
-        const { data, error } = await adminClient.auth.admin.createUser({
+        authSubject = await this.createOrUpdateSupabasePasswordUser(adminClient, {
           email: target.email,
           password: parsed.temporaryPassword,
-          email_confirm: true,
-          app_metadata: appMetadata,
-          user_metadata: userMetadata,
+          appMetadata,
+          userMetadata,
         });
-
-        if (error) {
-          throw new AuthWorkflowError(error.message, "SUPABASE_USER_CREATE_FAILED");
-        }
-
-        authSubject = data.user?.id ?? null;
         authProvider = authSubject ? "supabase" : authProvider;
         nextStatus = authSubject ? "ACTIVE" : nextStatus;
         provisioning = authSubject ? "SUPABASE_CREATED" : provisioning;
-      } else if (target.email) {
+      } else if (target.email && emailInvitesEnabled) {
         const redirectTo = process.env.CI4U_AUTH_INVITE_REDIRECT_URL;
         const { data, error } = await adminClient.auth.admin.inviteUserByEmail(target.email, {
           data: userMetadata,
@@ -595,22 +594,49 @@ export class AuthService {
     }
 
     if (adminClient && authSubject) {
-      const { error } = await adminClient.auth.admin.updateUserById(authSubject, {
-        app_metadata: {
-          ci4u_role: role,
-          ci4u_permissions: permissions,
-          ci4u_authority_stage: authorityStage,
-        },
-        user_metadata: {
-          name: parsed.name ?? target.name,
-          postTitle,
-          roleTags,
-        },
-      });
+      const shouldResetPassword = Boolean(parsed.temporaryPassword);
+      const authUpdateInput = parsed.temporaryPassword
+        ? {
+            password: parsed.temporaryPassword,
+            email_confirm: true,
+            app_metadata: {
+              ci4u_role: role,
+              ci4u_permissions: permissions,
+              ci4u_authority_stage: authorityStage,
+            },
+            user_metadata: {
+              name: parsed.name ?? target.name,
+              postTitle,
+              roleTags,
+            },
+          }
+        : {
+            app_metadata: {
+              ci4u_role: role,
+              ci4u_permissions: permissions,
+              ci4u_authority_stage: authorityStage,
+            },
+            user_metadata: {
+              name: parsed.name ?? target.name,
+              postTitle,
+              roleTags,
+            },
+          };
+      const { error } = await adminClient.auth.admin.updateUserById(authSubject, authUpdateInput);
 
       if (error) {
         throw new AuthWorkflowError(error.message, "SUPABASE_USER_METADATA_FAILED");
       }
+
+      if (shouldResetPassword) {
+        nextStatus = "ACTIVE";
+        provisioning = "SUPABASE_CREATED";
+      }
+    } else if (dataScope === "production" && !authSubject && !parsed.temporaryPassword && !emailInvitesEnabled) {
+      throw new AuthWorkflowError(
+        "Set a temporary password for this staff member. Email invite links are disabled until the Supabase redirect URL is fixed.",
+        "TEMPORARY_PASSWORD_REQUIRED",
+      );
     }
 
     const roleRecord = await this.ensureRole(role);
@@ -702,7 +728,8 @@ export class AuthService {
     this.requirePermission(user, permission);
   }
 
-  async deactivateUser(dataScope: DataScope, actor: RequestUser, userId: string): Promise<ManagedUser> {
+  async deactivateUser(dataScope: DataScope, actor: RequestUser, userId: string, input: DeactivateUserInput): Promise<ManagedUser> {
+    const parsed = userDeactivateSchema.parse(input);
     const actorProfile = await this.getCurrentUser(actor);
     this.requirePermission(actorProfile, "DELETE_USERS");
 
@@ -720,6 +747,7 @@ export class AuthService {
     }
 
     this.requireStage(actorProfile, target.authorityStage, "deactivate this user");
+    await this.verifyActorPasswordForSensitiveAction(dataScope, actor, actorProfile, parsed.actorPassword);
 
     const adminClient = this.getSupabaseAdminClient();
     if (adminClient && target.authSubject) {
@@ -1381,6 +1409,129 @@ export class AuthService {
     });
   }
 
+  private getSupabasePasswordClient(): SupabaseClient | null {
+    const supabaseUrl = process.env.CI4U_SUPABASE_URL;
+    const publishableKey = process.env.CI4U_SUPABASE_PUBLISHABLE_KEY ?? process.env.CI4U_SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !publishableKey) {
+      return null;
+    }
+
+    return createClient(supabaseUrl, publishableKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    });
+  }
+
+  private emailInvitesEnabled(): boolean {
+    return process.env.CI4U_ENABLE_SUPABASE_EMAIL_INVITES === "true";
+  }
+
+  private async createOrUpdateSupabasePasswordUser(
+    adminClient: SupabaseClient,
+    input: {
+      email: string;
+      password: string;
+      appMetadata: Record<string, unknown>;
+      userMetadata: Record<string, unknown>;
+    },
+  ): Promise<string | null> {
+    const { data, error } = await adminClient.auth.admin.createUser({
+      email: input.email,
+      password: input.password,
+      email_confirm: true,
+      app_metadata: input.appMetadata,
+      user_metadata: input.userMetadata,
+    });
+
+    if (!error) {
+      return data.user?.id ?? null;
+    }
+
+    if (!isSupabaseUserAlreadyRegistered(error.message)) {
+      throw new AuthWorkflowError(error.message, "SUPABASE_USER_CREATE_FAILED");
+    }
+
+    const existingAuthUser = await this.findSupabaseAuthUserByEmail(adminClient, input.email);
+
+    if (!existingAuthUser?.id) {
+      throw new AuthWorkflowError(error.message, "SUPABASE_USER_CREATE_FAILED");
+    }
+
+    const { error: updateError } = await adminClient.auth.admin.updateUserById(existingAuthUser.id, {
+      password: input.password,
+      email_confirm: true,
+      app_metadata: input.appMetadata,
+      user_metadata: input.userMetadata,
+    });
+
+    if (updateError) {
+      throw new AuthWorkflowError(updateError.message, "SUPABASE_USER_CREATE_FAILED");
+    }
+
+    return existingAuthUser.id;
+  }
+
+  private async findSupabaseAuthUserByEmail(adminClient: SupabaseClient, email: string): Promise<{ id: string } | null> {
+    const normalizedEmail = email.toLowerCase();
+
+    for (let page = 1; page <= 10; page += 1) {
+      const { data, error } = await adminClient.auth.admin.listUsers({
+        page,
+        perPage: 1000,
+      });
+
+      if (error) {
+        throw new AuthWorkflowError(error.message, "SUPABASE_USER_LOOKUP_FAILED");
+      }
+
+      const found = data.users.find((user) => user.email?.toLowerCase() === normalizedEmail);
+
+      if (found) {
+        return { id: found.id };
+      }
+
+      if (data.users.length < 1000) {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  private async verifyActorPasswordForSensitiveAction(dataScope: DataScope, requestUser: RequestUser, actor: SessionUser, actorPassword: string): Promise<void> {
+    if (actor.authSubject && requestUser.authProvider === "supabase") {
+      if (!actor.email) {
+        throw new AuthWorkflowError("Your login email is missing, so password confirmation cannot be completed.", "PASSWORD_CONFIRMATION_NOT_CONFIGURED");
+      }
+
+      const passwordClient = this.getSupabasePasswordClient();
+
+      if (!passwordClient) {
+        throw new AuthWorkflowError("Password confirmation is not configured on the API server.", "PASSWORD_CONFIRMATION_NOT_CONFIGURED");
+      }
+
+      const { data, error } = await passwordClient.auth.signInWithPassword({
+        email: actor.email,
+        password: actorPassword,
+      });
+
+      await passwordClient.auth.signOut().catch(() => undefined);
+
+      if (error || data.user?.id !== actor.authSubject) {
+        throw new AuthWorkflowError("Password confirmation failed. Enter your own current CI4U login password.", "PASSWORD_CONFIRMATION_FAILED");
+      }
+
+      return;
+    }
+
+    if (dataScope === "production") {
+      throw new AuthWorkflowError("Password confirmation requires a Supabase login session.", "PASSWORD_CONFIRMATION_NOT_CONFIGURED");
+    }
+  }
+
   private hasPermission(user: SessionUser, permission: PermissionCode): boolean {
     return allAccessRoles.has(user.role) || user.permissions.includes(permission);
   }
@@ -1565,6 +1716,11 @@ function provisioningForUser(user: Pick<DbUser, "authSubject" | "status">): Mana
   }
 
   return user.status === "INVITED" ? "SUPABASE_INVITED" : "SYNCED_LOGIN";
+}
+
+function isSupabaseUserAlreadyRegistered(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes("already registered") || normalized.includes("already exists") || normalized.includes("user already");
 }
 
 function resolvePerformanceRange(input: StaffPerformanceRangeInput, now: Date): { from: Date; to: Date } {
