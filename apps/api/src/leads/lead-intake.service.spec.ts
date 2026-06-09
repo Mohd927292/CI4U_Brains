@@ -471,6 +471,128 @@ describe("LeadIntakeService", () => {
     }
   });
 
+  it("surfaces due follow-up alerts and enforces the three-snooze limit", async () => {
+    const repository = new InMemoryLeadRepository();
+    const service = new LeadIntakeService(repository);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-09T10:00:00.000Z"));
+
+    try {
+      const created = await service.createManualLead(dataScope, {
+        businessName: "Alert Customer",
+        phone: "9123456792",
+        source: "MANUAL",
+        assignedToId: "staff-a",
+      });
+
+      expect(created.outcome).toBe("created");
+
+      if (created.outcome === "created") {
+        await service.saveCallOutcome(dataScope, created.lead.id, {
+          callOutcome: "WARM",
+          followUpAt: "2026-06-09T09:59:00.000Z",
+        });
+
+        const alerts = await service.listDueFollowUpAlerts(dataScope, "staff-a");
+        expect(alerts).toHaveLength(1);
+        const alert = alerts[0];
+        expect(alert).toBeDefined();
+        expect(alert).toMatchObject({
+          customerName: "Alert Customer",
+          reason: "NURTURE",
+          snoozeCount: 0,
+          maxSnoozes: 3,
+        });
+
+        const first = await service.snoozeFollowUpAlert(dataScope, alert!.id, { minutes: 5 }, "staff-a");
+        expect(first.snoozeCount).toBe(1);
+        expect(first.snoozedUntil?.toISOString()).toBe("2026-06-09T10:05:00.000Z");
+        expect(await service.listDueFollowUpAlerts(dataScope, "staff-a")).toHaveLength(0);
+
+        await service.snoozeFollowUpAlert(dataScope, alert!.id, { minutes: 5 }, "staff-a");
+        const third = await service.snoozeFollowUpAlert(dataScope, alert!.id, { minutes: 5 }, "staff-a");
+        expect(third.snoozeCount).toBe(3);
+
+        await expect(service.snoozeFollowUpAlert(dataScope, alert!.id, { minutes: 5 }, "staff-a")).rejects.toThrow("snoozed 3 times");
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds a due alert when staff chooses handle now", async () => {
+    const repository = new InMemoryLeadRepository();
+    const service = new LeadIntakeService(repository);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-09T10:00:00.000Z"));
+
+    try {
+      const created = await service.createManualLead(dataScope, {
+        businessName: "Handle Now Customer",
+        phone: "9123456793",
+        source: "MANUAL",
+        assignedToId: "staff-a",
+      });
+
+      expect(created.outcome).toBe("created");
+
+      if (created.outcome === "created") {
+        await service.saveCallOutcome(dataScope, created.lead.id, {
+          callOutcome: "WARM",
+          followUpAt: "2026-06-09T09:59:00.000Z",
+        });
+
+        const [alert] = await service.listDueFollowUpAlerts(dataScope, "staff-a");
+        expect(alert).toBeDefined();
+        const held = await service.holdFollowUpForHandling(dataScope, alert!.id, "staff-a");
+
+        expect(held.snoozedUntil?.toISOString()).toBe("2026-06-09T10:15:00.000Z");
+        expect(held.snoozeCount).toBe(0);
+        expect(await service.listDueFollowUpAlerts(dataScope, "staff-a")).toHaveLength(0);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows transferred leads in the receiver's due follow-up alerts", async () => {
+    const repository = new InMemoryLeadRepository();
+    const service = new LeadIntakeService(repository);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-09T10:00:00.000Z"));
+
+    try {
+      const created = await service.createManualLead(dataScope, {
+        businessName: "Transferred Alert Customer",
+        phone: "9123456794",
+        source: "MANUAL",
+        assignedToId: "staff-a",
+      });
+
+      expect(created.outcome).toBe("created");
+
+      if (created.outcome === "created") {
+        await service.transferLead(dataScope, created.lead.id, {
+          toUserId: "staff-b",
+          reason: "Senior staff should handle this follow-up.",
+        }, "staff-a");
+
+        const alerts = await service.listDueFollowUpAlerts(dataScope, "staff-b");
+        expect(alerts).toHaveLength(1);
+        expect(alerts[0]).toMatchObject({
+          customerName: "Transferred Alert Customer",
+          reason: "TRANSFERRED_LEAD",
+          isTransfer: true,
+        });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("requires scheduled site visit outcome on the next spoken follow-up", async () => {
     const repository = new InMemoryLeadRepository();
     const service = new LeadIntakeService(repository);

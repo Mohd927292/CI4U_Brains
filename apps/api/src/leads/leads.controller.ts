@@ -3,7 +3,7 @@ import type { Request } from "express";
 import { ZodError } from "zod";
 import type { SessionUser } from "../auth/auth.service";
 import { AuthService, AuthWorkflowError } from "../auth/auth.service";
-import { LeadIntakeService, LeadValidationError, type CreateLeadInput, type SaveCallOutcomeInput, type TransferLeadInput } from "./lead-intake.service";
+import { LeadIntakeService, LeadValidationError, type CreateLeadInput, type SaveCallOutcomeInput, type SnoozeFollowUpInput, type TransferLeadInput } from "./lead-intake.service";
 import { type ImportPreviewRowInput, type LeadQueue } from "./lead.types";
 
 @Controller("leads")
@@ -39,6 +39,35 @@ export class LeadsController {
     const actor = await this.requireActor(req);
     this.authService.assertPermission(actor, "WORK_ON_LEADS");
     return this.leadIntakeService.listLeadsByQueue(actor.dataScope, queue);
+  }
+
+  @Get("follow-up-alerts")
+  async listDueFollowUpAlerts(@Req() req: Request) {
+    const actor = await this.requireActor(req);
+    this.authService.assertPermission(actor, "WORK_ON_LEADS");
+    return this.leadIntakeService.listDueFollowUpAlerts(actor.dataScope, actor.id);
+  }
+
+  @Post("follow-up-alerts/:followUpId/snooze")
+  async snoozeFollowUpAlert(@Req() req: Request, @Param("followUpId") followUpId: string, @Body() body: SnoozeFollowUpInput) {
+    try {
+      const actor = await this.requireActor(req);
+      this.authService.assertPermission(actor, "WORK_ON_LEADS");
+      return await this.leadIntakeService.snoozeFollowUpAlert(actor.dataScope, followUpId, body, actor.id);
+    } catch (error) {
+      throw this.toBadRequest(error);
+    }
+  }
+
+  @Post("follow-up-alerts/:followUpId/handle-now")
+  async holdFollowUpForHandling(@Req() req: Request, @Param("followUpId") followUpId: string) {
+    try {
+      const actor = await this.requireActor(req);
+      this.authService.assertPermission(actor, "WORK_ON_LEADS");
+      return await this.leadIntakeService.holdFollowUpForHandling(actor.dataScope, followUpId, actor.id);
+    } catch (error) {
+      throw this.toBadRequest(error);
+    }
   }
 
   @Get(":leadId")

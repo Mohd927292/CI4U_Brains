@@ -194,6 +194,29 @@ export type NotificationSummary = {
   createdAt: string;
 };
 
+export type FollowUpAlert = {
+  id: string;
+  leadId: string;
+  customerId: string;
+  customerName: string;
+  phoneNormalized: string;
+  currentStage: string;
+  currentIntent: string;
+  priority: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  reason: string;
+  dueAt: string;
+  assignedToName: string | null;
+  lastActivitySummary: string | null;
+  snoozeCount: number;
+  snoozedUntil: string | null;
+  maxSnoozes: number;
+  isTransfer: boolean;
+};
+
+export type SnoozeFollowUpInput = {
+  minutes: number;
+};
+
 export type RawLeadListItem = {
   id: string;
   customerId: string;

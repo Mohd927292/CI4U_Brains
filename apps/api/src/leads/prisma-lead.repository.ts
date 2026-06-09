@@ -6,6 +6,7 @@ import {
   ArchiveCategory as DbArchiveCategory,
   type Customer as DbCustomer,
   DataScope as DbDataScope,
+  type FollowUp as DbFollowUp,
   type Lead as DbLead,
   type LeadActivity as DbLeadActivity,
   type LeadQuotation as DbLeadQuotation,
@@ -24,6 +25,8 @@ import {
   type CreateLeadRecordInput,
   type CreateLeadRecordResult,
   type ExistingPhoneRecord,
+  type FollowUpAlert,
+  type HoldFollowUpRecordInput,
   type LeadDetail,
   type LeadQueue,
   type LeadSaveAck,
@@ -32,6 +35,7 @@ import {
   type QuotationSuggestion,
   type QueueCounts,
   type RawLeadListItem,
+  type SnoozeFollowUpRecordInput,
   type TransferLeadRecordInput,
   type WonDetailsSnapshot,
   type UpdateLeadOutcomeRecordInput,
@@ -68,6 +72,14 @@ type PhoneIndexWithRelations = DbPhoneIndex & {
     assignedTo?: { name: string } | null;
     activities?: DbLeadActivity[];
   }) | null;
+};
+
+type FollowUpWithLead = DbFollowUp & {
+  lead: DbLead & {
+    customer: DbCustomer;
+    assignedTo?: { name: string } | null;
+    activities?: DbLeadActivity[];
+  };
 };
 
 type LeadSaveAckRow = {
@@ -519,6 +531,170 @@ export class PrismaLeadRepository implements LeadRepository {
     }
 
     return detail;
+  }
+
+  async listDueFollowUpAlerts(dataScope: DataScope, userId: string, now: Date): Promise<FollowUpAlert[]> {
+    const dbScope = toDbDataScope(dataScope);
+    const followUps = await this.prisma.followUp.findMany({
+      where: {
+        dataScope: dbScope,
+        assignedToId: userId,
+        status: "OPEN",
+        dueAt: { lte: now },
+        OR: [{ snoozedUntil: null }, { snoozedUntil: { lte: now } }],
+        lead: {
+          dataScope: dbScope,
+          isArchived: false,
+        },
+      },
+      include: {
+        lead: {
+          include: {
+            customer: true,
+            assignedTo: { select: { name: true } },
+            activities: {
+              orderBy: { createdAt: "desc" },
+              take: 1,
+            },
+          },
+        },
+      },
+      orderBy: [{ dueAt: "asc" }, { createdAt: "asc" }],
+      take: 10,
+    });
+
+    if (followUps.length) {
+      await this.prisma.followUp.updateMany({
+        where: {
+          id: { in: followUps.map((followUp) => followUp.id) },
+          dataScope: dbScope,
+          assignedToId: userId,
+          status: "OPEN",
+        },
+        data: {
+          lastAlertedAt: now,
+          updatedAt: now,
+        },
+      });
+    }
+
+    return (followUps as FollowUpWithLead[]).map((followUp) => this.toFollowUpAlert(followUp));
+  }
+
+  async snoozeFollowUp(input: SnoozeFollowUpRecordInput): Promise<FollowUpAlert> {
+    const followUp = await this.requireOwnedOpenFollowUp(input.dataScope, input.followUpId, input.userId);
+
+    if (followUp.snoozeCount >= 3) {
+      throw new Error("This follow-up has already been snoozed 3 times. You must handle it or assign it now.");
+    }
+
+    const snoozedUntil = new Date(input.now.getTime() + input.minutes * 60 * 1000);
+    const nextSnoozeCount = followUp.snoozeCount + 1;
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const next = await tx.followUp.update({
+        where: { id: followUp.id },
+        data: {
+          snoozeCount: nextSnoozeCount,
+          snoozedUntil,
+          updatedAt: input.now,
+        },
+        include: {
+          lead: {
+            include: {
+              customer: true,
+              assignedTo: { select: { name: true } },
+              activities: {
+                orderBy: { createdAt: "desc" },
+                take: 1,
+              },
+            },
+          },
+        },
+      });
+
+      const summary = `Follow-up snoozed for ${input.minutes} minutes. Snooze ${nextSnoozeCount}/3.`;
+
+      await tx.leadActivity.create({
+        data: {
+          dataScope: toDbDataScope(input.dataScope),
+          leadId: followUp.leadId,
+          customerId: followUp.customerId,
+          type: "FOLLOW_UP_SCHEDULED",
+          summary,
+          createdById: input.userId,
+          createdAt: input.now,
+        },
+      });
+
+      await tx.staffActivityEvent.create({
+        data: {
+          dataScope: toDbDataScope(input.dataScope),
+          userId: input.userId,
+          leadId: followUp.leadId,
+          customerId: followUp.customerId,
+          type: "FOLLOW_UP_SCHEDULED",
+          summary,
+          metadata: {
+            followUpId: followUp.id,
+            snoozeMinutes: input.minutes,
+            snoozeCount: nextSnoozeCount,
+            snoozedUntil: snoozedUntil.toISOString(),
+          },
+          occurredAt: input.now,
+          createdAt: input.now,
+        },
+      });
+
+      return next;
+    });
+
+    return this.toFollowUpAlert(updated as FollowUpWithLead);
+  }
+
+  async holdFollowUpForHandling(input: HoldFollowUpRecordInput): Promise<FollowUpAlert> {
+    const followUp = await this.requireOwnedOpenFollowUp(input.dataScope, input.followUpId, input.userId);
+    const snoozedUntil = new Date(input.now.getTime() + input.holdMinutes * 60 * 1000);
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const next = await tx.followUp.update({
+        where: { id: followUp.id },
+        data: {
+          snoozedUntil,
+          updatedAt: input.now,
+        },
+        include: {
+          lead: {
+            include: {
+              customer: true,
+              assignedTo: { select: { name: true } },
+              activities: {
+                orderBy: { createdAt: "desc" },
+                take: 1,
+              },
+            },
+          },
+        },
+      });
+
+      const summary = `Follow-up opened for handling. Alert held for ${input.holdMinutes} minutes.`;
+
+      await tx.leadActivity.create({
+        data: {
+          dataScope: toDbDataScope(input.dataScope),
+          leadId: followUp.leadId,
+          customerId: followUp.customerId,
+          type: "FOLLOW_UP_COMPLETED",
+          summary,
+          createdById: input.userId,
+          createdAt: input.now,
+        },
+      });
+
+      return next;
+    });
+
+    return this.toFollowUpAlert(updated as FollowUpWithLead);
   }
 
   private canUseCompactAck(input: UpdateLeadOutcomeRecordInput): boolean {
@@ -1093,6 +1269,59 @@ export class PrismaLeadRepository implements LeadRepository {
       lastActivitySummary: lastActivity?.summary ?? null,
       createdAt: lead.createdAt,
       updatedAt: lead.updatedAt,
+    };
+  }
+
+  private async requireOwnedOpenFollowUp(dataScope: DataScope, followUpId: string, userId: string): Promise<FollowUpWithLead> {
+    const followUp = await this.prisma.followUp.findUnique({
+      where: { id: followUpId },
+      include: {
+        lead: {
+          include: {
+            customer: true,
+            assignedTo: { select: { name: true } },
+            activities: {
+              orderBy: { createdAt: "desc" },
+              take: 1,
+            },
+          },
+        },
+      },
+    });
+
+    if (
+      !followUp ||
+      followUp.dataScope !== toDbDataScope(dataScope) ||
+      followUp.status !== "OPEN" ||
+      followUp.assignedToId !== userId ||
+      followUp.lead.isArchived
+    ) {
+      throw new Error("Follow-up alert was not found for this user.");
+    }
+
+    return followUp as FollowUpWithLead;
+  }
+
+  private toFollowUpAlert(followUp: FollowUpWithLead): FollowUpAlert {
+    const lastActivity = followUp.lead.activities?.[0] ?? null;
+
+    return {
+      id: followUp.id,
+      leadId: followUp.leadId,
+      customerId: followUp.customerId,
+      customerName: followUp.lead.customer.businessName,
+      phoneNormalized: followUp.lead.customer.primaryPhoneNormalized,
+      currentStage: followUp.lead.currentStage,
+      currentIntent: followUp.lead.currentIntent,
+      priority: followUp.priority,
+      reason: followUp.reason,
+      dueAt: followUp.dueAt,
+      assignedToName: followUp.lead.assignedTo?.name ?? null,
+      lastActivitySummary: lastActivity?.summary ?? null,
+      snoozeCount: followUp.snoozeCount,
+      snoozedUntil: followUp.snoozedUntil,
+      maxSnoozes: 3,
+      isTransfer: followUp.reason === "TRANSFERRED_LEAD",
     };
   }
 

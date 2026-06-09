@@ -43,6 +43,53 @@ const userVisibilityPermissions: ReadonlySet<PermissionCode> = new Set(["SUPERVI
 const userWithRoles = {
   roles: { include: { role: true } },
 } as const;
+const devAssignableUsers: AssignableUser[] = [
+  {
+    id: "dev-founder",
+    name: "Rahul Verma",
+    email: null,
+    role: "FOUNDER",
+    postTitle: defaultPostTitle("FOUNDER"),
+    roleTags: defaultRoleTags("FOUNDER"),
+    authorityStage: defaultAuthorityStage("FOUNDER"),
+  },
+  {
+    id: "dev-sales_manager",
+    name: "Rachana Decos",
+    email: null,
+    role: "SALES_MANAGER",
+    postTitle: defaultPostTitle("SALES_MANAGER"),
+    roleTags: defaultRoleTags("SALES_MANAGER"),
+    authorityStage: defaultAuthorityStage("SALES_MANAGER"),
+  },
+  {
+    id: "dev-sales_executive",
+    name: "Sandeep Decos",
+    email: null,
+    role: "SALES_EXECUTIVE",
+    postTitle: defaultPostTitle("SALES_EXECUTIVE"),
+    roleTags: defaultRoleTags("SALES_EXECUTIVE"),
+    authorityStage: defaultAuthorityStage("SALES_EXECUTIVE"),
+  },
+  {
+    id: "dev-operations_manager",
+    name: "Operations Dev",
+    email: null,
+    role: "OPERATIONS_MANAGER",
+    postTitle: defaultPostTitle("OPERATIONS_MANAGER"),
+    roleTags: defaultRoleTags("OPERATIONS_MANAGER"),
+    authorityStage: defaultAuthorityStage("OPERATIONS_MANAGER"),
+  },
+  {
+    id: "dev-vendor_manager",
+    name: "Vendor Desk",
+    email: null,
+    role: "VENDOR_MANAGER",
+    postTitle: defaultPostTitle("VENDOR_MANAGER"),
+    roleTags: defaultRoleTags("VENDOR_MANAGER"),
+    authorityStage: defaultAuthorityStage("VENDOR_MANAGER"),
+  },
+];
 
 const userCreateSchema = z.object({
   name: z.string().trim().min(1, "Name is required."),
@@ -284,6 +331,10 @@ export class AuthService {
   async listAssignableUsers(dataScope: DataScope, actor: RequestUser): Promise<AssignableUser[]> {
     const actorProfile = await this.getCurrentUser(actor);
     this.requirePermission(actorProfile, "TRANSFER_LEADS");
+
+    if (actorProfile.authSubject?.startsWith("dev-") && dataScope === "development") {
+      return devAssignableUsers.filter((user) => user.id !== actorProfile.id);
+    }
 
     const users = await this.prisma.user.findMany({
       where: {

@@ -466,6 +466,9 @@ model FollowUp {
   priority    LeadPriority   @default(MEDIUM)
   status      FollowUpStatus @default(OPEN)
   assignedToId String?       @map("assigned_to_id")
+  snoozeCount Int            @default(0) @map("snooze_count")
+  snoozedUntil DateTime?     @map("snoozed_until")
+  lastAlertedAt DateTime?    @map("last_alerted_at")
   completedAt DateTime?      @map("completed_at")
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @updatedAt @map("updated_at")
@@ -475,6 +478,7 @@ model FollowUp {
   assignedTo User?    @relation("FollowUpAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
 
   @@index([dataScope, assignedToId, dueAt, status])
+  @@index([dataScope, assignedToId, snoozedUntil, status])
   @@index([leadId, status])
   @@index([customerId])
   @@index([assignedToId])

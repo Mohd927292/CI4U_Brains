@@ -11,6 +11,7 @@ import {
   type CallOutcome,
   type CreateLeadOutcome,
   type FollowUpReason,
+  type FollowUpAlert,
   type ExistingPhoneRecord,
   type ImportCommitResult,
   type ImportPreviewResult,
@@ -101,6 +102,11 @@ const transferLeadSchema = z.object({
 });
 
 export type TransferLeadInput = z.input<typeof transferLeadSchema>;
+const snoozeFollowUpSchema = z.object({
+  minutes: z.coerce.number().int().min(5, "Snooze must be at least 5 minutes.").max(55, "Snooze cannot be more than 55 minutes."),
+});
+
+export type SnoozeFollowUpInput = z.input<typeof snoozeFollowUpSchema>;
 type SaveMode = "detail" | "ack";
 type SaveCallOutcomeResult = LeadDetail | LeadSaveAck;
 
@@ -212,6 +218,48 @@ export class LeadIntakeService {
       followUpAt,
       now,
     });
+  }
+
+  async listDueFollowUpAlerts(dataScope: DataScope, userId: string): Promise<FollowUpAlert[]> {
+    return this.leadRepository.listDueFollowUpAlerts(dataScope, userId, new Date());
+  }
+
+  async snoozeFollowUpAlert(dataScope: DataScope, followUpId: string, input: SnoozeFollowUpInput, userId: string): Promise<FollowUpAlert> {
+    const parsed = snoozeFollowUpSchema.parse(input);
+
+    try {
+      return await this.leadRepository.snoozeFollowUp({
+        dataScope,
+        followUpId,
+        userId,
+        minutes: parsed.minutes,
+        now: new Date(),
+      });
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new LeadValidationError(error.message, "FOLLOW_UP_SNOOZE_BLOCKED");
+      }
+
+      throw error;
+    }
+  }
+
+  async holdFollowUpForHandling(dataScope: DataScope, followUpId: string, userId: string): Promise<FollowUpAlert> {
+    try {
+      return await this.leadRepository.holdFollowUpForHandling({
+        dataScope,
+        followUpId,
+        userId,
+        holdMinutes: 15,
+        now: new Date(),
+      });
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new LeadValidationError(error.message, "FOLLOW_UP_HANDLE_BLOCKED");
+      }
+
+      throw error;
+    }
   }
 
   private async saveCallOutcomeForLead(lead: LeadWorkflowState, input: SaveCallOutcomeInput, mode: SaveMode, actorId: string | null): Promise<SaveCallOutcomeResult> {

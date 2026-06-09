@@ -307,6 +307,41 @@ export type TransferLeadRecordInput = {
   now: Date;
 };
 
+export type FollowUpAlert = {
+  id: string;
+  leadId: string;
+  customerId: string;
+  customerName: string;
+  phoneNormalized: string;
+  currentStage: LeadStage;
+  currentIntent: LeadIntent;
+  priority: LeadPriority;
+  reason: string;
+  dueAt: Date;
+  assignedToName: string | null;
+  lastActivitySummary: string | null;
+  snoozeCount: number;
+  snoozedUntil: Date | null;
+  maxSnoozes: number;
+  isTransfer: boolean;
+};
+
+export type SnoozeFollowUpRecordInput = {
+  dataScope: DataScope;
+  followUpId: string;
+  userId: string;
+  minutes: number;
+  now: Date;
+};
+
+export type HoldFollowUpRecordInput = {
+  dataScope: DataScope;
+  followUpId: string;
+  userId: string;
+  holdMinutes: number;
+  now: Date;
+};
+
 export type PersistedQuotationInput = {
   title: string;
   totalPricePaise: number;

@@ -4,6 +4,8 @@ import {
   type CreateLeadRecordInput,
   type CreateLeadRecordResult,
   type ExistingPhoneRecord,
+  type FollowUpAlert,
+  type HoldFollowUpRecordInput,
   type LeadDetail,
   type LeadQueue,
   type LeadSaveAck,
@@ -12,6 +14,7 @@ import {
   type QuotationSuggestion,
   type QueueCounts,
   type RawLeadListItem,
+  type SnoozeFollowUpRecordInput,
   type TransferLeadRecordInput,
   type WonDetailsSnapshot,
   type UpdateLeadOutcomeRecordInput,
@@ -30,6 +33,9 @@ export interface LeadRepository {
   updateLeadOutcome(input: UpdateLeadOutcomeRecordInput): Promise<LeadDetail>;
   updateLeadOutcomeAck(input: UpdateLeadOutcomeRecordInput): Promise<LeadSaveAck>;
   transferLead(input: TransferLeadRecordInput): Promise<LeadDetail>;
+  listDueFollowUpAlerts(dataScope: DataScope, userId: string, now: Date): Promise<FollowUpAlert[]>;
+  snoozeFollowUp(input: SnoozeFollowUpRecordInput): Promise<FollowUpAlert>;
+  holdFollowUpForHandling(input: HoldFollowUpRecordInput): Promise<FollowUpAlert>;
 }
 
 export class DuplicatePhoneConflictError extends Error {
@@ -38,12 +44,32 @@ export class DuplicatePhoneConflictError extends Error {
   }
 }
 
+type InMemoryFollowUp = {
+  id: string;
+  dataScope: DataScope;
+  leadId: string;
+  customerId: string;
+  dueAt: Date;
+  reason: string;
+  priority: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  status: "OPEN" | "COMPLETED" | "MISSED" | "CANCELLED";
+  assignedToId: string | null;
+  snoozeCount: number;
+  snoozedUntil: Date | null;
+  lastAlertedAt: Date | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 export class InMemoryLeadRepository implements LeadRepository {
   private readonly phoneIndex = new Map<string, ExistingPhoneRecord>();
   private readonly leadCycleByCustomer = new Map<string, number>();
   private readonly customers = new Map<string, CreateLeadRecordResult["customer"]>();
   private readonly leads = new Map<string, CreateLeadRecordResult["lead"]>();
   private readonly activities = new Map<string, CreateLeadRecordResult["activity"][]>();
+  private readonly followUps = new Map<string, InMemoryFollowUp>();
+  private readonly leadAssignees = new Map<string, string | null>();
   private readonly quotationItems = new Map<string, QuotationSuggestion["items"][number]>();
   private readonly quotationTemplates = new Map<string, QuotationSuggestion["packages"][number]>();
   private readonly leadQuotations = new Map<string, QuotationSnapshot[]>();
@@ -120,6 +146,7 @@ export class InMemoryLeadRepository implements LeadRepository {
     });
     this.customers.set(customerId, customer);
     this.leads.set(leadId, lead);
+    this.leadAssignees.set(leadId, input.assignedToId);
     this.activities.set(leadId, [activity]);
 
     return { customer, lead, activity };
@@ -236,6 +263,7 @@ export class InMemoryLeadRepository implements LeadRepository {
       createdAt: input.now,
     };
     this.activities.set(lead.id, [...(this.activities.get(lead.id) ?? []), activity]);
+    this.closeOpenFollowUps(lead.id, input.now, "COMPLETED");
 
     if (input.quotation) {
       this.persistQuotation(lead.id, input.quotation, input.now);
@@ -263,6 +291,19 @@ export class InMemoryLeadRepository implements LeadRepository {
       lastActivitySummary: input.activitySummary,
       lastUpdatedAt: input.now,
     });
+
+    if (input.nextFollowUpAt) {
+      this.createFollowUp({
+        dataScope: input.dataScope,
+        leadId: lead.id,
+        customerId: lead.customerId,
+        dueAt: input.nextFollowUpAt,
+        reason: input.followUpReason ?? "FOLLOW_UP",
+        priority: input.priority,
+        assignedToId: this.leadAssignees.get(lead.id) ?? null,
+        now: input.now,
+      });
+    }
 
     const detail = await this.getLeadDetail(input.dataScope, input.leadId);
 
@@ -307,6 +348,8 @@ export class InMemoryLeadRepository implements LeadRepository {
 
     lead.nextFollowUpAt = input.followUpAt;
     lead.updatedAt = input.now;
+    this.leadAssignees.set(lead.id, input.toUserId);
+    this.closeOpenFollowUps(lead.id, input.now, "CANCELLED");
 
     const activity = {
       id: randomUUID(),
@@ -330,6 +373,17 @@ export class InMemoryLeadRepository implements LeadRepository {
       });
     }
 
+    this.createFollowUp({
+      dataScope: input.dataScope,
+      leadId: lead.id,
+      customerId: lead.customerId,
+      dueAt: input.followUpAt,
+      reason: "TRANSFERRED_LEAD",
+      priority: lead.priority,
+      assignedToId: input.toUserId,
+      now: input.now,
+    });
+
     const detail = await this.getLeadDetail(input.dataScope, input.leadId);
 
     if (!detail) {
@@ -339,8 +393,167 @@ export class InMemoryLeadRepository implements LeadRepository {
     return detail;
   }
 
+  async listDueFollowUpAlerts(dataScope: DataScope, userId: string, now: Date): Promise<FollowUpAlert[]> {
+    const alerts = Array.from(this.followUps.values())
+      .filter((followUp) => followUp.dataScope === dataScope)
+      .filter((followUp) => followUp.status === "OPEN")
+      .filter((followUp) => followUp.assignedToId === userId)
+      .filter((followUp) => followUp.dueAt.getTime() <= now.getTime())
+      .filter((followUp) => !followUp.snoozedUntil || followUp.snoozedUntil.getTime() <= now.getTime())
+      .map((followUp) => this.toFollowUpAlert(followUp))
+      .filter((alert): alert is FollowUpAlert => Boolean(alert))
+      .sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
+
+    for (const alert of alerts) {
+      const followUp = this.followUps.get(alert.id);
+
+      if (followUp) {
+        followUp.lastAlertedAt = now;
+        followUp.updatedAt = now;
+      }
+    }
+
+    return alerts;
+  }
+
+  async snoozeFollowUp(input: SnoozeFollowUpRecordInput): Promise<FollowUpAlert> {
+    const followUp = this.requireOwnedOpenFollowUp(input.dataScope, input.followUpId, input.userId);
+
+    if (followUp.snoozeCount >= 3) {
+      throw new Error("This follow-up has already been snoozed 3 times. You must handle it or assign it now.");
+    }
+
+    followUp.snoozeCount += 1;
+    followUp.snoozedUntil = new Date(input.now.getTime() + input.minutes * 60 * 1000);
+    followUp.updatedAt = input.now;
+    this.appendLeadActivity(followUp.leadId, "FOLLOW_UP_SCHEDULED", `Follow-up snoozed for ${input.minutes} minutes. Snooze ${followUp.snoozeCount}/3.`, input.now);
+
+    const alert = this.toFollowUpAlert(followUp);
+
+    if (!alert) {
+      throw new Error("Follow-up alert could not be loaded after snooze.");
+    }
+
+    return alert;
+  }
+
+  async holdFollowUpForHandling(input: HoldFollowUpRecordInput): Promise<FollowUpAlert> {
+    const followUp = this.requireOwnedOpenFollowUp(input.dataScope, input.followUpId, input.userId);
+    followUp.snoozedUntil = new Date(input.now.getTime() + input.holdMinutes * 60 * 1000);
+    followUp.updatedAt = input.now;
+    this.appendLeadActivity(followUp.leadId, "FOLLOW_UP_COMPLETED", `Follow-up opened for handling. Alert held for ${input.holdMinutes} minutes.`, input.now);
+
+    const alert = this.toFollowUpAlert(followUp);
+
+    if (!alert) {
+      throw new Error("Follow-up alert could not be loaded after handle-now hold.");
+    }
+
+    return alert;
+  }
+
   seedExistingPhone(record: ExistingPhoneRecord): void {
     this.phoneIndex.set(this.scopedPhoneKey(record.dataScope, record.phoneNormalized), record);
+  }
+
+  private createFollowUp(input: {
+    dataScope: DataScope;
+    leadId: string;
+    customerId: string;
+    dueAt: Date;
+    reason: string;
+    priority: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+    assignedToId: string | null;
+    now: Date;
+  }): void {
+    const id = randomUUID();
+    this.followUps.set(id, {
+      id,
+      dataScope: input.dataScope,
+      leadId: input.leadId,
+      customerId: input.customerId,
+      dueAt: input.dueAt,
+      reason: input.reason,
+      priority: input.priority,
+      status: "OPEN",
+      assignedToId: input.assignedToId,
+      snoozeCount: 0,
+      snoozedUntil: null,
+      lastAlertedAt: null,
+      completedAt: null,
+      createdAt: input.now,
+      updatedAt: input.now,
+    });
+  }
+
+  private closeOpenFollowUps(leadId: string, now: Date, status: "COMPLETED" | "CANCELLED"): void {
+    for (const followUp of this.followUps.values()) {
+      if (followUp.leadId !== leadId || followUp.status !== "OPEN") {
+        continue;
+      }
+
+      followUp.status = status;
+      followUp.completedAt = status === "COMPLETED" ? now : null;
+      followUp.updatedAt = now;
+    }
+  }
+
+  private requireOwnedOpenFollowUp(dataScope: DataScope, followUpId: string, userId: string): InMemoryFollowUp {
+    const followUp = this.followUps.get(followUpId);
+
+    if (!followUp || followUp.dataScope !== dataScope || followUp.status !== "OPEN" || followUp.assignedToId !== userId) {
+      throw new Error("Follow-up alert was not found for this user.");
+    }
+
+    return followUp;
+  }
+
+  private appendLeadActivity(leadId: string, type: CreateLeadRecordResult["activity"]["type"], summary: string, now: Date): void {
+    const lead = this.leads.get(leadId);
+
+    if (!lead) {
+      return;
+    }
+
+    this.activities.set(leadId, [
+      ...(this.activities.get(leadId) ?? []),
+      {
+        id: randomUUID(),
+        leadId,
+        customerId: lead.customerId,
+        type,
+        summary,
+        createdAt: now,
+      },
+    ]);
+  }
+
+  private toFollowUpAlert(followUp: InMemoryFollowUp): FollowUpAlert | null {
+    const lead = this.leads.get(followUp.leadId);
+    const listItem = lead ? this.toRawLeadListItem(lead) : null;
+
+    if (!lead || !listItem || lead.isArchived) {
+      return null;
+    }
+
+    return {
+      id: followUp.id,
+      leadId: followUp.leadId,
+      customerId: followUp.customerId,
+      customerName: listItem.customerName,
+      phoneNormalized: listItem.phoneNormalized,
+      currentStage: listItem.currentStage,
+      currentIntent: listItem.currentIntent,
+      priority: listItem.priority,
+      reason: followUp.reason,
+      dueAt: followUp.dueAt,
+      assignedToName: listItem.assignedToName,
+      lastActivitySummary: listItem.lastActivitySummary,
+      snoozeCount: followUp.snoozeCount,
+      snoozedUntil: followUp.snoozedUntil,
+      maxSnoozes: 3,
+      isTransfer: followUp.reason === "TRANSFERRED_LEAD",
+    };
   }
 
   private nextLeadCycleNumber(customerId: string): number {

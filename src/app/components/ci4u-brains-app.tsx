@@ -45,6 +45,7 @@ import {
   type CreateLeadResponse,
   type DevRole,
   type DevSession,
+  type FollowUpAlert,
   type ImportCommitResult,
   type ImportPreviewResult,
   type ImportRowInput,
@@ -61,6 +62,7 @@ import {
   type RawLeadListItem,
   type SaveCallOutcomeInput,
   type SessionUser,
+  type SnoozeFollowUpInput,
   type TransferLeadInput,
   type StaffLeaderboards,
   type UpdateManagedUserInput,
@@ -256,6 +258,9 @@ export function Ci4uBrainsApp() {
   const [pendingSaveCount, setPendingSaveCount] = useState(0);
   const [notifications, setNotifications] = useState<NotificationSummary[]>([]);
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
+  const [followUpAlerts, setFollowUpAlerts] = useState<FollowUpAlert[]>([]);
+  const [activeFollowUpAlert, setActiveFollowUpAlert] = useState<FollowUpAlert | null>(null);
+  const [followUpAlertMessage, setFollowUpAlertMessage] = useState<string | null>(null);
   const [passwordPanelOpen, setPasswordPanelOpen] = useState(false);
   const leadDetailCache = useRef<Map<string, LeadDetail>>(new Map());
   const queueCache = useRef<Map<LeadQueue, RawLeadListItem[]>>(new Map());
@@ -283,6 +288,28 @@ export function Ci4uBrainsApp() {
       setNotifications(await apiGet<NotificationSummary[]>("/auth/notifications", activeSession));
     } catch {
       setNotifications([]);
+    }
+  }, [session]);
+
+  const loadFollowUpAlerts = useCallback(async (activeSession = session) => {
+    if (!activeSession || !hasPermission(activeSession, "WORK_ON_LEADS")) {
+      setFollowUpAlerts([]);
+      setActiveFollowUpAlert(null);
+      return;
+    }
+
+    try {
+      const alerts = await apiGet<FollowUpAlert[]>("/leads/follow-up-alerts", activeSession);
+      setFollowUpAlerts(alerts);
+      setActiveFollowUpAlert((current) => {
+        if (current && alerts.some((alert) => alert.id === current.id)) {
+          return alerts.find((alert) => alert.id === current.id) ?? current;
+        }
+
+        return alerts[0] ?? null;
+      });
+    } catch {
+      setFollowUpAlerts([]);
     }
   }, [session]);
 
@@ -378,7 +405,8 @@ export function Ci4uBrainsApp() {
     setSessionReady(true);
     void loadQueue("RAW", syncedSession, { preferCache: true });
     void loadNotifications(syncedSession);
-  }, [loadNotifications, loadQueue]);
+    void loadFollowUpAlerts(syncedSession);
+  }, [loadFollowUpAlerts, loadNotifications, loadQueue]);
 
   useEffect(() => {
     if (sessionReady) {
@@ -423,6 +451,7 @@ export function Ci4uBrainsApp() {
     const timer = window.setTimeout(() => {
       void loadQueue("RAW", session, { preferCache: true });
       void loadNotifications(session);
+      void loadFollowUpAlerts(session);
     }, 0);
 
     return () => {
@@ -433,7 +462,34 @@ export function Ci4uBrainsApp() {
       window.clearTimeout(pendingCountTimer);
       window.clearTimeout(timer);
     };
-  }, [loadNotifications, loadQueue, session]);
+  }, [loadFollowUpAlerts, loadNotifications, loadQueue, session]);
+
+  useEffect(() => {
+    if (!session || !hasPermission(session, "WORK_ON_LEADS")) {
+      return undefined;
+    }
+
+    const interval = window.setInterval(() => {
+      void loadFollowUpAlerts(session);
+      void loadNotifications(session);
+    }, 15000);
+
+    function refreshOnFocus() {
+      if (document.visibilityState === "visible") {
+        void loadFollowUpAlerts(session);
+        void loadNotifications(session);
+      }
+    }
+
+    window.addEventListener("focus", refreshOnFocus);
+    document.addEventListener("visibilitychange", refreshOnFocus);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshOnFocus);
+      document.removeEventListener("visibilitychange", refreshOnFocus);
+    };
+  }, [loadFollowUpAlerts, loadNotifications, session]);
 
   function prefetchAdjacentLeads(currentLeadId: string, queueSnapshot = rawLeads, activeSession = session) {
     if (!activeSession) {
@@ -496,6 +552,7 @@ export function Ci4uBrainsApp() {
     window.localStorage.setItem(sessionStorageKey, JSON.stringify(nextSession));
     setSession(nextSession);
     void loadQueue("RAW", nextSession, { preferCache: true });
+    void loadFollowUpAlerts(nextSession);
   }
 
   async function loginWithSupabase(email: string, password: string) {
@@ -519,6 +576,7 @@ export function Ci4uBrainsApp() {
     setSession(nextSession);
     void loadQueue("RAW", nextSession, { preferCache: true });
     void loadNotifications(nextSession);
+    void loadFollowUpAlerts(nextSession);
   }
 
   async function syncProductionSession(accessToken: string): Promise<DevSession> {
@@ -558,6 +616,9 @@ export function Ci4uBrainsApp() {
     setRawLeads([]);
     setQueueCounts(emptyQueueCounts);
     setNotifications([]);
+    setFollowUpAlerts([]);
+    setActiveFollowUpAlert(null);
+    setFollowUpAlertMessage(null);
     setNotificationPanelOpen(false);
     setPasswordPanelOpen(false);
     setSelectedLead(null);
@@ -585,6 +646,75 @@ export function Ci4uBrainsApp() {
       await apiPost<NotificationSummary>(`/auth/notifications/${notificationId}/read`, session, {});
     } catch {
       void loadNotifications(session);
+    }
+  }
+
+  function removeFollowUpAlert(followUpId: string) {
+    setFollowUpAlerts((current) => current.filter((alert) => alert.id !== followUpId));
+    setActiveFollowUpAlert((current) => (current?.id === followUpId ? null : current));
+  }
+
+  async function snoozeFollowUpAlert(alert: FollowUpAlert, minutes: number) {
+    if (!session) {
+      return;
+    }
+
+    setFollowUpAlertMessage(null);
+
+    try {
+      const payload: SnoozeFollowUpInput = { minutes };
+      const snoozed = await apiPost<FollowUpAlert>(`/leads/follow-up-alerts/${alert.id}/snooze`, session, payload);
+      removeFollowUpAlert(alert.id);
+      setWorkMessage(
+        snoozed.snoozeCount >= snoozed.maxSnoozes
+          ? `${alert.customerName} used the final snooze. Next alert must be handled or assigned.`
+          : `${alert.customerName} snoozed for ${minutes} minutes.`,
+      );
+      window.setTimeout(() => setWorkMessage(null), 3500);
+      void loadNotifications(session);
+    } catch (error) {
+      setFollowUpAlertMessage(error instanceof Error ? error.message : "Could not snooze this follow-up.");
+    }
+  }
+
+  async function handleFollowUpNow(alert: FollowUpAlert) {
+    if (!session) {
+      return;
+    }
+
+    setFollowUpAlertMessage(null);
+
+    try {
+      await apiPost<FollowUpAlert>(`/leads/follow-up-alerts/${alert.id}/handle-now`, session, {});
+    } catch {
+      // Opening the lead is still useful. The next poll will resurface the alert if the server hold failed.
+    }
+
+    removeFollowUpAlert(alert.id);
+    await openLead(alert.leadId);
+  }
+
+  async function assignFollowUpAlert(alert: FollowUpAlert, toUserId: string, reason: string) {
+    if (!session) {
+      return;
+    }
+
+    setFollowUpAlertMessage(null);
+
+    try {
+      await apiPost<LeadDetail>(`/leads/${alert.leadId}/transfer`, session, {
+        toUserId,
+        reason,
+        followUpAt: new Date().toISOString(),
+      } satisfies TransferLeadInput);
+      removeFollowUpAlert(alert.id);
+      setWorkMessage(`${alert.customerName} assigned to the selected staff member for immediate follow-up.`);
+      void loadCounts(session);
+      void loadNotifications(session);
+      void loadFollowUpAlerts(session);
+      window.setTimeout(() => setWorkMessage(null), 3500);
+    } catch (error) {
+      setFollowUpAlertMessage(error instanceof Error ? error.message : "Could not assign this follow-up.");
     }
   }
 
@@ -678,6 +808,7 @@ export function Ci4uBrainsApp() {
       setFailedSave(nextPending);
       setWorkMessage(`${lead.customerName} saved as ${formatEnum(ack.currentStage)}. Server confirmed.`);
       void loadCounts(session);
+      void loadFollowUpAlerts(session);
       window.setTimeout(() => setWorkMessage(null), 2500);
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : "Background save failed.";
@@ -777,6 +908,17 @@ export function Ci4uBrainsApp() {
             onOpenPasswordPanel={() => setPasswordPanelOpen(true)}
             onLogout={() => void logout()}
           />
+          {activeFollowUpAlert ? (
+            <FollowUpAlertDialog
+              alert={activeFollowUpAlert}
+              alertCount={followUpAlerts.length}
+              session={session}
+              message={followUpAlertMessage}
+              onSnooze={(minutes) => void snoozeFollowUpAlert(activeFollowUpAlert, minutes)}
+              onHandleNow={() => void handleFollowUpNow(activeFollowUpAlert)}
+              onAssign={(toUserId, reason) => void assignFollowUpAlert(activeFollowUpAlert, toUserId, reason)}
+            />
+          ) : null}
           <div className="mx-auto flex w-full max-w-[1540px] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
             {error ? <Notice tone="danger" title="Action blocked" message={error} /> : null}
             {passwordPanelOpen && session.authMode === "supabase" ? (
@@ -813,6 +955,7 @@ export function Ci4uBrainsApp() {
                   setSelectedLead(updatedLead);
                   void loadQueue(activeQueue, session, { preferCache: false, refreshCounts: true });
                   void loadNotifications(session);
+                  void loadFollowUpAlerts(session);
                 }}
                 onBack={() => setActiveView("raw-leads")}
               />
@@ -1213,6 +1356,201 @@ function TopBar({
         </button>
       </div>
     </header>
+  );
+}
+
+function FollowUpAlertDialog({
+  alert,
+  alertCount,
+  session,
+  message,
+  onSnooze,
+  onHandleNow,
+  onAssign,
+}: {
+  alert: FollowUpAlert;
+  alertCount: number;
+  session: DevSession;
+  message: string | null;
+  onSnooze: (minutes: number) => void | Promise<void>;
+  onHandleNow: () => void | Promise<void>;
+  onAssign: (toUserId: string, reason: string) => void | Promise<void>;
+}) {
+  const [mode, setMode] = useState<"idle" | "snooze" | "assign">("idle");
+  const [minutes, setMinutes] = useState(5);
+  const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
+  const [assignToUserId, setAssignToUserId] = useState("");
+  const [assignReason, setAssignReason] = useState(alert.isTransfer ? "Reassigning transferred lead follow-up." : "Assigning due follow-up to another staff member.");
+  const [busy, setBusy] = useState(false);
+  const [assignUsersLoading, setAssignUsersLoading] = useState(false);
+  const canSnooze = alert.snoozeCount < alert.maxSnoozes;
+  const finalSnooze = alert.snoozeCount === alert.maxSnoozes - 1;
+  const canAssign = hasPermission(session, "TRANSFER_LEADS");
+
+  async function openAssignPanel() {
+    setMode("assign");
+
+    if (!canAssign || assignableUsers.length || assignUsersLoading) {
+      return;
+    }
+
+    setAssignUsersLoading(true);
+
+    try {
+      const users = await apiGet<AssignableUser[]>("/auth/assignable-users", session);
+      const options = users.filter((user) => user.id !== session.userId);
+      setAssignableUsers(options);
+      setAssignToUserId(options[0]?.id ?? "");
+    } catch {
+      setAssignableUsers([]);
+    } finally {
+      setAssignUsersLoading(false);
+    }
+  }
+
+  async function submitSnooze() {
+    setBusy(true);
+
+    try {
+      await onSnooze(minutes);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitHandleNow() {
+    setBusy(true);
+
+    try {
+      await onHandleNow();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitAssign() {
+    if (!assignToUserId || !assignReason.trim()) {
+      return;
+    }
+
+    setBusy(true);
+
+    try {
+      await onAssign(assignToUserId, assignReason.trim());
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm">
+      <section className="w-full max-w-3xl rounded-md border border-red-300/35 bg-[#071a33] shadow-[0_28px_100px_rgba(0,0,0,0.55)]">
+        <div className="border-b border-white/10 bg-red-500/12 px-5 py-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase text-red-100">
+                <Bell className="h-4 w-4" />
+                Follow-up due now
+                {alert.isTransfer ? <span className="rounded-md bg-cyan-300/15 px-2 py-1 text-cyan-100">Transferred lead</span> : null}
+                {alertCount > 1 ? <span className="rounded-md bg-white/10 px-2 py-1">{alertCount} due alerts</span> : null}
+              </div>
+              <h2 className="mt-2 text-2xl font-semibold">{alert.customerName}</h2>
+              <p className="mt-1 text-sm text-slate-300">
+                {alert.phoneNormalized} | Due {formatDateTime(alert.dueAt)} | Snoozed {alert.snoozeCount}/{alert.maxSnoozes}
+              </p>
+            </div>
+            <span className={`rounded-md px-3 py-2 text-sm font-semibold ${alert.priority === "CRITICAL" || alert.priority === "HIGH" ? "bg-red-500 text-white" : "bg-orange-400/20 text-orange-100"}`}>
+              {formatEnum(alert.priority)}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid gap-4 p-5 md:grid-cols-3">
+          <Info label="Stage" value={formatEnum(alert.currentStage)} />
+          <Info label="Intent" value={formatEnum(alert.currentIntent)} />
+          <Info label="Reason" value={formatEnum(alert.reason)} />
+        </div>
+
+        <div className="px-5 pb-5">
+          <div className="rounded-md border border-white/10 bg-black/25 p-4">
+            <div className="text-xs font-semibold uppercase text-slate-400">Previous context</div>
+            <p className="mt-2 text-sm leading-6 text-slate-200">{alert.lastActivitySummary ?? "No previous activity summary is available for this follow-up."}</p>
+          </div>
+
+          {alert.snoozeCount >= alert.maxSnoozes ? (
+            <Notice tone="danger" title="Action required" message="This follow-up has already been snoozed 3 times. You must handle it now or assign it to another allowed staff member." />
+          ) : finalSnooze ? (
+            <Notice tone="warning" title="Final snooze warning" message="This is the third and final snooze. After this, the snooze option will be blocked and action will be mandatory." />
+          ) : null}
+
+          {message ? <Notice tone="danger" title="Follow-up action blocked" message={message} /> : null}
+
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button className="primary-button" type="button" disabled={busy} onClick={() => void submitHandleNow()}>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ChevronRight className="h-4 w-4" />}
+              Handle Now
+            </button>
+            <button className="secondary-button" type="button" disabled={busy || !canAssign} onClick={() => void openAssignPanel()}>
+              <Send className="h-4 w-4" />
+              Assign Now
+            </button>
+            {canSnooze ? (
+              <button className={`secondary-button ${finalSnooze ? "border-red-300/40 bg-red-500/10 text-red-100" : ""}`} type="button" disabled={busy} onClick={() => setMode("snooze")}>
+                <CalendarClock className="h-4 w-4" />
+                {finalSnooze ? "Final Snooze" : "Snooze"}
+              </button>
+            ) : null}
+          </div>
+
+          {mode === "snooze" && canSnooze ? (
+            <div className="mt-4 rounded-md border border-orange-300/25 bg-orange-400/10 p-4">
+              <div className="flex flex-wrap items-end gap-4">
+                <Field label="Snooze minutes">
+                  <div className="flex min-w-[280px] items-center gap-3">
+                    <input className="h-2 flex-1 accent-orange-300" type="range" min={5} max={55} step={5} value={minutes} onChange={(event) => setMinutes(Number(event.target.value))} />
+                    <input className="field w-24" type="number" min={5} max={55} step={5} value={minutes} onChange={(event) => setMinutes(clampSnoozeMinutes(Number(event.target.value)))} />
+                  </div>
+                </Field>
+                <button className="primary-button" type="button" disabled={busy} onClick={() => void submitSnooze()}>
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarClock className="h-4 w-4" />}
+                  OK
+                </button>
+                <button className="secondary-button" type="button" disabled={busy} onClick={() => setMode("idle")}>
+                  Cancel
+                </button>
+              </div>
+              <p className="mt-3 text-xs text-orange-100">Default is 5 minutes. Maximum allowed snooze is 55 minutes. Every snooze is saved in the lead history.</p>
+            </div>
+          ) : null}
+
+          {mode === "assign" ? (
+            <div className="mt-4 rounded-md border border-cyan-300/25 bg-cyan-400/10 p-4">
+              {!canAssign ? <Notice tone="danger" title="Assign blocked" message="Your role does not have lead transfer permission." /> : null}
+              <div className="grid gap-3 md:grid-cols-[1fr_1.2fr_auto]">
+                <Field label="Assign to">
+                  <select className="field" value={assignToUserId} disabled={!canAssign || assignUsersLoading} onChange={(event) => setAssignToUserId(event.target.value)}>
+                    {assignUsersLoading ? <option>Loading staff...</option> : null}
+                    {!assignUsersLoading && !assignableUsers.length ? <option>No assignable staff found</option> : null}
+                    {assignableUsers.map((user) => (
+                      <option key={user.id} value={user.id}>
+                        {user.name} - {user.postTitle ?? formatEnum(user.role)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Assign reason">
+                  <input className="field" value={assignReason} onChange={(event) => setAssignReason(event.target.value)} />
+                </Field>
+                <button className="primary-button self-end" type="button" disabled={busy || !canAssign || !assignToUserId || !assignReason.trim()} onClick={() => void submitAssign()}>
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  Assign
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -4424,6 +4762,14 @@ function provisioningMessage(user: ManagedUser): string {
 function formatDateTime(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+}
+
+function clampSnoozeMinutes(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 5;
+  }
+
+  return Math.min(55, Math.max(5, Math.round(value / 5) * 5));
 }
 
 function paiseToRs(value: number): number {
