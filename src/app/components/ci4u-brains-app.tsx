@@ -9,6 +9,8 @@ import {
   CheckCircle2,
   ChevronRight,
   ClipboardCheck,
+  Eye,
+  EyeOff,
   FileCheck2,
   FileSpreadsheet,
   Info as InfoIcon,
@@ -886,11 +888,16 @@ function AccessLogin({
               <input className="field" type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
             </Field>
             <Field label="Password">
-              <input className="field" type="password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  void submitProductionLogin();
-                }
-              }} />
+              <PasswordInput
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    void submitProductionLogin();
+                  }
+                }}
+              />
             </Field>
             <button className="primary-button w-full" type="button" disabled={busy || !email.trim() || !password} onClick={() => void submitProductionLogin()}>
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LockKeyhole className="h-4 w-4" />}
@@ -997,12 +1004,11 @@ function PasswordChangePanel({
       </div>
       <div className="mt-4 grid gap-4 md:grid-cols-2">
         <Field label="New Password">
-          <input className="field" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+          <PasswordInput autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
         </Field>
         <Field label="Confirm New Password">
-          <input
-            className="field"
-            type="password"
+          <PasswordInput
+            autoComplete="new-password"
             value={confirmPassword}
             onChange={(event) => setConfirmPassword(event.target.value)}
             onKeyDown={(event) => {
@@ -1834,7 +1840,7 @@ function UserManagementWorkspace({ session, onUsersChanged }: { session: DevSess
             <input className="field" type="number" min={1} max={100} value={authorityStage} onChange={(event) => setAuthorityStage(event.target.value)} />
           </Field>
           <Field label="Temporary Password">
-            <input className="field" type="password" value={temporaryPassword} onChange={(event) => setTemporaryPassword(event.target.value)} placeholder="Min 8 chars, optional" />
+            <PasswordInput autoComplete="new-password" value={temporaryPassword} onChange={(event) => setTemporaryPassword(event.target.value)} placeholder="Min 8 chars, optional" />
           </Field>
         </div>
         <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3">
@@ -2182,9 +2188,10 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
           </div>
           <div className="mt-4 flex flex-wrap items-end gap-3">
             <Field label="Your Password">
-              <input
+              <PasswordInput
                 className="field min-w-[260px]"
-                type="password"
+                containerClassName="min-w-[260px]"
+                autoComplete="current-password"
                 value={deactivationPassword}
                 onChange={(event) => setDeactivationPassword(event.target.value)}
                 onKeyDown={(event) => {
@@ -2381,9 +2388,9 @@ function UserManagementWorkspaceV2({ session, onUsersChanged }: { session: DevSe
           </Field>
           <Field label={passwordRequiredForSave ? "Temporary Password *" : "Reset Password"}>
             <div className="flex gap-2">
-              <input
-                className="field"
-                type="password"
+              <PasswordInput
+                containerClassName="min-w-0 flex-1"
+                autoComplete="new-password"
                 value={temporaryPassword}
                 onChange={(event) => setTemporaryPassword(event.target.value)}
                 placeholder={passwordRequiredForSave ? "Required, minimum 8 characters" : "Optional password reset"}
@@ -4621,6 +4628,30 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="mb-2 block text-sm font-semibold text-slate-200">{label}</span>
       {children}
     </label>
+  );
+}
+
+function PasswordInput({
+  className = "field",
+  containerClassName = "w-full",
+  ...props
+}: Omit<React.InputHTMLAttributes<HTMLInputElement>, "type"> & { containerClassName?: string }) {
+  const [visible, setVisible] = useState(false);
+  const buttonLabel = visible ? "Hide password" : "Show password";
+
+  return (
+    <div className={`relative ${containerClassName}`}>
+      <input {...props} className={`${className} pr-11`} type={visible ? "text" : "password"} />
+      <button
+        aria-label={buttonLabel}
+        className="absolute right-2 top-1/2 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-md text-slate-300 transition hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/50"
+        title={buttonLabel}
+        type="button"
+        onClick={() => setVisible((current) => !current)}
+      >
+        {visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
   );
 }
 
