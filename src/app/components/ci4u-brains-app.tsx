@@ -21,6 +21,7 @@ import {
   Pause,
   Plus,
   Send,
+  Trash2,
   UserPlus,
   RefreshCw,
   Search,
@@ -43,6 +44,7 @@ import {
   type DeactivateManagedUserInput,
   type CreateVendorInput,
   type CreateLeadResponse,
+  type DeleteRawLeadsResult,
   type DevRole,
   type DevSession,
   type FollowUpAlert,
@@ -250,6 +252,7 @@ export function Ci4uBrainsApp() {
   const [rawLeads, setRawLeads] = useState<RawLeadListItem[]>([]);
   const [queueCounts, setQueueCounts] = useState<QueueCounts>(emptyQueueCounts);
   const [selectedLead, setSelectedLead] = useState<LeadDetail | null>(null);
+  const [openingLeadId, setOpeningLeadId] = useState<string | null>(null);
   const [queueLoading, setQueueLoading] = useState<LeadQueue | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -265,6 +268,7 @@ export function Ci4uBrainsApp() {
   const leadDetailCache = useRef<Map<string, LeadDetail>>(new Map());
   const queueCache = useRef<Map<LeadQueue, RawLeadListItem[]>>(new Map());
   const queueRequestId = useRef(0);
+  const leadOpenRequestId = useRef(0);
 
   const loadCounts = useCallback(async (activeSession = session) => {
     if (!activeSession) {
@@ -274,7 +278,8 @@ export function Ci4uBrainsApp() {
     try {
       setQueueCounts(await apiGet<QueueCounts>("/leads/counts", activeSession));
     } catch {
-      setQueueCounts(emptyQueueCounts);
+      // Keep the last known values. Replacing counts with zero on a transient
+      // network/server delay makes the CRM look empty while real data exists.
     }
   }, [session]);
 
@@ -344,6 +349,8 @@ export function Ci4uBrainsApp() {
     if (options.preferCache && cachedRows) {
       setRawLeads(cachedRows);
       void prefetchLeadDetails(cachedRows, activeSession);
+    } else if (!cachedRows) {
+      setRawLeads([]);
     }
 
     try {
@@ -520,24 +527,73 @@ export function Ci4uBrainsApp() {
 
     if (cached) {
       setSelectedLead(cached);
+      setOpeningLeadId(null);
       setActiveView("lead-detail");
       prefetchAdjacentLeads(leadId);
       return;
     }
 
+    const requestId = leadOpenRequestId.current + 1;
+    leadOpenRequestId.current = requestId;
+    setSelectedLead(null);
+    setOpeningLeadId(leadId);
+    setActiveView("lead-detail");
     setLoading(true);
     setError(null);
 
     try {
       const detail = await apiGet<LeadDetail>(`/leads/${leadId}`, session);
+
+      if (leadOpenRequestId.current !== requestId) {
+        return;
+      }
+
       leadDetailCache.current.set(leadId, detail);
       setSelectedLead(detail);
-      setActiveView("lead-detail");
+      setOpeningLeadId(null);
       prefetchAdjacentLeads(leadId);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not open lead.");
+      if (leadOpenRequestId.current === requestId) {
+        setError(loadError instanceof Error ? loadError.message : "Could not open lead.");
+        setActiveView("raw-leads");
+        setOpeningLeadId(null);
+      }
     } finally {
-      setLoading(false);
+      if (leadOpenRequestId.current === requestId) {
+        setLoading(false);
+      }
+    }
+  }
+
+  function handleRawLeadsDeleted(result: DeleteRawLeadsResult) {
+    const deletedIds = new Set(result.deletedLeadIds);
+
+    if (!deletedIds.size) {
+      setWorkMessage("No eligible raw leads were deleted. Worked, won, or archived leads stay protected.");
+      return;
+    }
+
+    queueCache.current.forEach((rows, queue) => {
+      queueCache.current.set(queue, rows.filter((lead) => !deletedIds.has(lead.id)));
+    });
+    result.deletedLeadIds.forEach((leadId) => leadDetailCache.current.delete(leadId));
+    setRawLeads((current) => current.filter((lead) => !deletedIds.has(lead.id)));
+    setQueueCounts((current) => ({
+      ...current,
+      RAW: Math.max(0, (current.RAW ?? 0) - result.deletedCount),
+    }));
+
+    if (selectedLead && deletedIds.has(selectedLead.id)) {
+      setSelectedLead(null);
+      setActiveView("raw-leads");
+    }
+
+    setWorkMessage(
+      `${result.deletedCount} raw lead${result.deletedCount === 1 ? "" : "s"} deleted safely.${result.skippedCount ? ` ${result.skippedCount} protected record${result.skippedCount === 1 ? "" : "s"} skipped.` : ""}`,
+    );
+
+    if (session) {
+      void loadCounts(session);
     }
   }
 
@@ -549,8 +605,13 @@ export function Ci4uBrainsApp() {
       dataScope: "development",
       authMode: "dev",
     });
+    leadDetailCache.current.clear();
+    queueCache.current.clear();
+    setRawLeads([]);
+    setQueueCounts(emptyQueueCounts);
     window.localStorage.setItem(sessionStorageKey, JSON.stringify(nextSession));
     setSession(nextSession);
+    void loadCounts(nextSession);
     void loadQueue("RAW", nextSession, { preferCache: true });
     void loadFollowUpAlerts(nextSession);
   }
@@ -572,8 +633,13 @@ export function Ci4uBrainsApp() {
     }
 
     const nextSession = await syncProductionSession(data.session.access_token);
+    leadDetailCache.current.clear();
+    queueCache.current.clear();
+    setRawLeads([]);
+    setQueueCounts(emptyQueueCounts);
     window.localStorage.setItem(sessionStorageKey, JSON.stringify(nextSession));
     setSession(nextSession);
+    void loadCounts(nextSession);
     void loadQueue("RAW", nextSession, { preferCache: true });
     void loadNotifications(nextSession);
     void loadFollowUpAlerts(nextSession);
@@ -801,7 +867,12 @@ export function Ci4uBrainsApp() {
     try {
       const ack = await apiPost<LeadSaveAck>(`/leads/${lead.id}/call-outcome/ack`, session, payload);
       leadDetailCache.current.delete(ack.id);
-      upsertLeadInQueueCache(queueForLeadListItem(ack), ack);
+      const destinationQueue = queueForLeadListItem(ack);
+      upsertLeadInQueueCache(destinationQueue, ack);
+      setQueueCounts((current) => ({
+        ...current,
+        [destinationQueue]: (current[destinationQueue] ?? 0) + 1,
+      }));
       forgetBackgroundSave(lead.id);
       refreshPendingSaveCount();
       const nextPending = readPendingBackgroundSaves()[0] ?? null;
@@ -819,6 +890,10 @@ export function Ci4uBrainsApp() {
       setError(`Background save failed for ${lead.customerName}: ${message}`);
       upsertLeadInQueueCache(queue, leadDetailToListItem(lead));
       setRawLeads((current) => (current.some((leadItem) => leadItem.id === lead.id) ? current : [leadDetailToListItem(lead), ...current]));
+      setQueueCounts((current) => ({
+        ...current,
+        [queue]: (current[queue] ?? 0) + 1,
+      }));
       void loadCounts(session);
     }
   }
@@ -937,9 +1012,10 @@ export function Ci4uBrainsApp() {
                 activeQueue={activeQueue}
                 rawLeads={rawLeads}
                 queueLoading={queueLoading === activeQueue}
-                onRefresh={() => loadQueue(activeQueue, session, { preferCache: true })}
-                onLeadCreated={() => loadQueue("RAW", session, { preferCache: true })}
+                onRefresh={() => loadQueue(activeQueue, session, { preferCache: false })}
+                onLeadCreated={() => loadQueue("RAW", session, { preferCache: false })}
                 onOpenLead={openLead}
+                onRawLeadsDeleted={handleRawLeadsDeleted}
               />
             ) : null}
             {activeView === "vendors" ? <VendorsWorkspace session={session} /> : null}
@@ -951,8 +1027,15 @@ export function Ci4uBrainsApp() {
                 lead={selectedLead}
                 onSaveRequested={handleLeadUpdateRequested}
                 onLeadTransferred={(updatedLead) => {
-                  leadDetailCache.current.set(updatedLead.id, updatedLead);
-                  setSelectedLead(updatedLead);
+                  leadDetailCache.current.delete(updatedLead.id);
+                  removeLeadFromQueueCache(activeQueue, updatedLead.id);
+                  setRawLeads((current) => current.filter((leadItem) => leadItem.id !== updatedLead.id));
+                  setQueueCounts((current) => ({
+                    ...current,
+                    [activeQueue]: Math.max(0, (current[activeQueue] ?? 0) - 1),
+                  }));
+                  setSelectedLead(null);
+                  setActiveView("raw-leads");
                   void loadQueue(activeQueue, session, { preferCache: false, refreshCounts: true });
                   void loadNotifications(session);
                   void loadFollowUpAlerts(session);
@@ -960,6 +1043,7 @@ export function Ci4uBrainsApp() {
                 onBack={() => setActiveView("raw-leads")}
               />
             ) : null}
+            {activeView === "lead-detail" && !selectedLead ? <LeadOpeningPanel leadId={openingLeadId} onBack={() => setActiveView("raw-leads")} /> : null}
           </div>
         </section>
       </div>
@@ -975,6 +1059,32 @@ function DevLoading() {
         Preparing CI4U Brains
       </div>
     </main>
+  );
+}
+
+function LeadOpeningPanel({ leadId, onBack }: { leadId: string | null; onBack: () => void }) {
+  return (
+    <Panel
+      title="Opening lead"
+      action={
+        <button className="secondary-button" onClick={onBack}>
+          Back to list
+        </button>
+      }
+    >
+      <div className="flex min-h-[280px] flex-col items-center justify-center gap-4 text-center">
+        <div className="rounded-full border border-cyan-300/20 bg-cyan-300/10 p-4 text-cyan-100">
+          <Loader2 className="h-6 w-6 animate-spin" />
+        </div>
+        <div>
+          <p className="text-lg font-semibold text-white">Loading the latest customer record</p>
+          <p className="mt-2 max-w-xl text-sm text-slate-300">
+            The previous lead is hidden while this opens, so staff never work on stale customer data.
+          </p>
+          {leadId ? <p className="mt-3 text-xs text-slate-500">Lead ID: {leadId}</p> : null}
+        </div>
+      </div>
+    </Panel>
   );
 }
 
@@ -1601,6 +1711,7 @@ function RawLeadsWorkspace({
   onRefresh,
   onLeadCreated,
   onOpenLead,
+  onRawLeadsDeleted,
 }: {
   session: DevSession;
   activeQueue: LeadQueue;
@@ -1609,6 +1720,7 @@ function RawLeadsWorkspace({
   onRefresh: () => void;
   onLeadCreated: () => void;
   onOpenLead: (leadId: string) => void;
+  onRawLeadsDeleted: (result: DeleteRawLeadsResult) => void;
 }) {
   const [manualName, setManualName] = useState("");
   const [manualPhone, setManualPhone] = useState("");
@@ -1618,6 +1730,13 @@ function RawLeadsWorkspace({
   const [fileMessage, setFileMessage] = useState<string | null>(null);
   const [workStatus, setWorkStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
+
+  const canDeleteRawLeads = activeQueue === "RAW" && hasPermission(session, "ADD_RAW_LEADS");
+  const visibleLeadIds = rawLeads.map((lead) => lead.id);
+  const selectedVisibleLeadIds = visibleLeadIds.filter((leadId) => selectedLeadIds.has(leadId));
+  const selectedVisibleCount = selectedVisibleLeadIds.length;
+  const allVisibleSelected = visibleLeadIds.length > 0 && selectedVisibleCount === visibleLeadIds.length;
 
   async function createManualLead() {
     setBusy(true);
@@ -1719,6 +1838,79 @@ function RawLeadsWorkspace({
     }
   }
 
+  function toggleLeadSelection(leadId: string) {
+    setSelectedLeadIds((current) => {
+      const next = new Set(current);
+
+      if (next.has(leadId)) {
+        next.delete(leadId);
+      } else {
+        next.add(leadId);
+      }
+
+      return next;
+    });
+  }
+
+  function toggleVisibleSelection() {
+    setSelectedLeadIds((current) => {
+      if (allVisibleSelected) {
+        const next = new Set(current);
+        visibleLeadIds.forEach((leadId) => next.delete(leadId));
+        return next;
+      }
+
+      return new Set([...current, ...visibleLeadIds]);
+    });
+  }
+
+  async function deleteSelectedRawLeads() {
+    const leadIds = selectedVisibleLeadIds;
+
+    if (!leadIds.length) {
+      setWorkStatus("Select at least one raw lead to delete.");
+      return;
+    }
+
+    if (!window.confirm(`Delete ${leadIds.length} selected raw lead${leadIds.length === 1 ? "" : "s"}? This removes only untouched raw leads and releases their phone numbers for future import.`)) {
+      return;
+    }
+
+    setBusy(true);
+    setWorkStatus("Deleting selected raw leads safely...");
+
+    try {
+      const result = await apiDelete<DeleteRawLeadsResult>("/leads/raw", session, { leadIds });
+      setSelectedLeadIds(new Set());
+      onRawLeadsDeleted(result);
+    } catch (error) {
+      setFileMessage(error instanceof Error ? error.message : "Could not delete selected raw leads.");
+    } finally {
+      setBusy(false);
+      setWorkStatus(null);
+    }
+  }
+
+  async function deleteAllRawLeads() {
+    if (!window.confirm("Delete all untouched raw leads? Worked, won, lost, and archived leads stay protected.")) {
+      return;
+    }
+
+    setBusy(true);
+    setWorkStatus("Deleting all untouched raw leads safely...");
+
+    try {
+      const result = await apiDelete<DeleteRawLeadsResult>("/leads/raw", session, { deleteAllRaw: true });
+      setSelectedLeadIds(new Set());
+      onRawLeadsDeleted(result);
+    } catch (error) {
+      setFileMessage(error instanceof Error ? error.message : "Could not delete all raw leads.");
+    } finally {
+      setBusy(false);
+      setWorkStatus(null);
+    }
+  }
+
   return (
     <section className={`grid gap-5 ${activeQueue === "RAW" ? "xl:grid-cols-[420px_1fr]" : ""}`}>
       {activeQueue === "RAW" ? (
@@ -1767,6 +1959,24 @@ function RawLeadsWorkspace({
           title={queueTitle(activeQueue)}
           action={
             <div className="flex flex-wrap items-center gap-3">
+              {canDeleteRawLeads ? (
+                <>
+                  <span className="rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold text-slate-200">
+                    {selectedVisibleCount} selected
+                  </span>
+                  <button className="secondary-button" disabled={busy || queueLoading || !rawLeads.length} onClick={toggleVisibleSelection}>
+                    {allVisibleSelected ? "Clear" : "Select all"}
+                  </button>
+                  <button className="secondary-button text-rose-100 hover:border-rose-300/40 hover:bg-rose-500/10" disabled={busy || !selectedVisibleCount} onClick={() => void deleteSelectedRawLeads()}>
+                    <Trash2 className="h-4 w-4" />
+                    Delete selected
+                  </button>
+                  <button className="secondary-button text-rose-100 hover:border-rose-300/40 hover:bg-rose-500/10" disabled={busy || queueLoading || !rawLeads.length} onClick={() => void deleteAllRawLeads()}>
+                    <Trash2 className="h-4 w-4" />
+                    Delete all raw
+                  </button>
+                </>
+              ) : null}
               {queueLoading ? <span className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200">Syncing</span> : null}
               <button className="secondary-button" disabled={queueLoading} onClick={onRefresh}>
                 <RefreshCw className={`h-4 w-4 ${queueLoading ? "animate-spin" : ""}`} />
@@ -1779,6 +1989,17 @@ function RawLeadsWorkspace({
             <table className="w-full min-w-[760px] border-collapse text-left text-sm">
               <thead className="sticky top-0 z-10 bg-[#08162c] text-xs uppercase text-slate-400 shadow-[0_1px_0_rgba(255,255,255,0.08)]">
                 <tr>
+                  <th className="w-12 px-4 py-3">
+                    {canDeleteRawLeads ? (
+                      <input
+                        aria-label="Select all visible raw leads"
+                        checked={allVisibleSelected}
+                        className="h-4 w-4 rounded border-white/20 bg-slate-950 accent-cyan-400"
+                        type="checkbox"
+                        onChange={toggleVisibleSelection}
+                      />
+                    ) : null}
+                  </th>
                   <th className="px-4 py-3">Customer</th>
                   <th className="px-4 py-3">Phone</th>
                   <th className="px-4 py-3">Source</th>
@@ -1791,6 +2012,17 @@ function RawLeadsWorkspace({
                 {queueLoading && !rawLeads.length ? <QueueSkeletonRows /> : null}
                 {rawLeads.map((lead) => (
                   <tr key={lead.id} className="hover:bg-white/[0.03]">
+                    <td className="px-4 py-3">
+                      {canDeleteRawLeads ? (
+                        <input
+                          aria-label={`Select ${lead.customerName}`}
+                          checked={selectedLeadIds.has(lead.id)}
+                          className="h-4 w-4 rounded border-white/20 bg-slate-950 accent-cyan-400"
+                          type="checkbox"
+                          onChange={() => toggleLeadSelection(lead.id)}
+                        />
+                      ) : null}
+                    </td>
                     <td className="px-4 py-3 font-semibold">{lead.customerName}</td>
                     <td className="px-4 py-3 text-cyan-100">{lead.phoneNormalized}</td>
                     <td className="px-4 py-3">{lead.source}</td>
@@ -1805,7 +2037,7 @@ function RawLeadsWorkspace({
                 ))}
                 {!rawLeads.length && !queueLoading ? (
                   <tr>
-                    <td className="px-4 py-8 text-center text-slate-400" colSpan={6}>
+                    <td className="px-4 py-8 text-center text-slate-400" colSpan={7}>
                       {activeQueue === "RAW" ? "No raw leads yet. Add manually or import your CSV/XLSX file." : `No records in ${queueTitle(activeQueue)} yet.`}
                     </td>
                   </tr>
@@ -1838,7 +2070,7 @@ function QueueSkeletonRows() {
     <>
       {Array.from({ length: 6 }).map((_, index) => (
         <tr key={index}>
-          {Array.from({ length: 6 }).map((__, cellIndex) => (
+          {Array.from({ length: 7 }).map((__, cellIndex) => (
             <td key={cellIndex} className="px-4 py-3">
               <div className="h-4 w-full max-w-[180px] animate-pulse rounded bg-white/10" />
             </td>
@@ -3291,6 +3523,7 @@ function LeadDetailWorkspaceV2({
   const [transferFollowUpTime, setTransferFollowUpTime] = useState(defaultLocalDateTime(0).time);
   const [loadingAssignableUsers, setLoadingAssignableUsers] = useState(false);
   const [transferBusy, setTransferBusy] = useState(false);
+  const saveActionGuard = useRef(false);
 
   const isFollowUp = lead.currentStage !== "RAW_UNTOUCHED" || lead.spokenCount > 0;
   const outcomeOptions = normalizeOutcomeOptions(isFollowUp ? lead.followUpOutcomeOptions : lead.firstCallOutcomeOptions, lead);
@@ -3485,6 +3718,20 @@ function LeadDetailWorkspaceV2({
     } finally {
       setBusy(false);
     }
+  }
+
+  function requestSaveCallUpdate(event: React.SyntheticEvent<HTMLButtonElement>) {
+    event.preventDefault();
+
+    if (busy || !callOutcome || saveActionGuard.current) {
+      return;
+    }
+
+    saveActionGuard.current = true;
+    window.setTimeout(() => {
+      saveActionGuard.current = false;
+    }, 750);
+    saveCallUpdate();
   }
 
   async function transferLead() {
@@ -3783,7 +4030,7 @@ function LeadDetailWorkspaceV2({
 
           {notice ? <Notice tone={notice.tone} title={notice.title} message={notice.message} /> : null}
 
-          <button className="primary-button mt-5" disabled={!callOutcome || busy} onClick={() => void saveCallUpdate()}>
+          <button className="primary-button mt-5" type="button" disabled={!callOutcome || busy} onPointerDown={requestSaveCallUpdate} onClick={requestSaveCallUpdate}>
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
             Save Lead Update
           </button>
@@ -4534,6 +4781,7 @@ function TimelineEventCard({ event, onInspect }: { event: LeadDetail["timeline"]
         <div>
           <div className="text-xs uppercase text-cyan-200">{formatEnum(event.type)}</div>
           <div className="mt-1 text-xs text-slate-400">{formatDateTime(event.createdAt)}</div>
+          <div className="mt-1 text-xs text-slate-300">By {event.createdByName ?? "System"}</div>
         </div>
         <button
           className="grid h-8 w-8 place-items-center rounded-md border border-cyan-300/20 bg-cyan-300/10 text-cyan-100"
@@ -4566,6 +4814,7 @@ function TimelineDetailTab({ event, onClose }: { event: LeadDetail["timeline"][n
           <div className="text-xs uppercase text-cyan-200">{formatEnum(event.type)}</div>
           <h2 className="mt-1 text-xl font-semibold">Follow-up Details</h2>
           <p className="mt-1 text-sm text-slate-300">{formatDateTime(event.createdAt)}</p>
+          <p className="mt-1 text-sm text-slate-300">Handled by {event.createdByName ?? "System"}</p>
         </div>
         <button className="secondary-button" type="button" onClick={onClose}>
           <X className="h-4 w-4" />
@@ -4586,7 +4835,7 @@ function TimelineDetailTab({ event, onClose }: { event: LeadDetail["timeline"][n
 
 function timelineSections(event: LeadDetail["timeline"][number]): Array<{ label: string; value: string }> {
   const summary = event.summary || "";
-  const sections: Array<{ label: string; value: string }> = [];
+  const sections: Array<{ label: string; value: string }> = [{ label: "Handled By", value: event.createdByName ?? "System" }];
 
   if (summary.startsWith("Spoke.")) {
     sections.push({ label: "Call Outcome", value: "Spoke" });

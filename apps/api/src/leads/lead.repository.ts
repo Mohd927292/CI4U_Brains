@@ -3,9 +3,12 @@ import type { DataScope } from "../auth/auth.types";
 import {
   type CreateLeadRecordInput,
   type CreateLeadRecordResult,
+  type DeleteRawLeadsRecordInput,
+  type DeleteRawLeadsResult,
   type ExistingPhoneRecord,
   type FollowUpAlert,
   type HoldFollowUpRecordInput,
+  type LeadAccessScope,
   type LeadDetail,
   type LeadQueue,
   type LeadSaveAck,
@@ -25,17 +28,18 @@ export const leadRepositoryToken = Symbol("LeadRepository");
 export interface LeadRepository {
   findByNormalizedPhone(dataScope: DataScope, phoneNormalized: string): Promise<ExistingPhoneRecord | null>;
   createCustomerAndLead(input: CreateLeadRecordInput): Promise<CreateLeadRecordResult>;
-  listRawLeads(dataScope: DataScope): Promise<RawLeadListItem[]>;
-  listLeadsByQueue(dataScope: DataScope, queue: LeadQueue): Promise<RawLeadListItem[]>;
-  getQueueCounts(dataScope: DataScope): Promise<QueueCounts>;
-  getLeadWorkflowState(dataScope: DataScope, leadId: string): Promise<LeadWorkflowState | null>;
-  getLeadDetail(dataScope: DataScope, leadId: string): Promise<LeadDetail | null>;
+  listRawLeads(dataScope: DataScope, access?: LeadAccessScope | null): Promise<RawLeadListItem[]>;
+  listLeadsByQueue(dataScope: DataScope, queue: LeadQueue, access?: LeadAccessScope | null): Promise<RawLeadListItem[]>;
+  getQueueCounts(dataScope: DataScope, access?: LeadAccessScope | null): Promise<QueueCounts>;
+  getLeadWorkflowState(dataScope: DataScope, leadId: string, access?: LeadAccessScope | null): Promise<LeadWorkflowState | null>;
+  getLeadDetail(dataScope: DataScope, leadId: string, access?: LeadAccessScope | null): Promise<LeadDetail | null>;
   updateLeadOutcome(input: UpdateLeadOutcomeRecordInput): Promise<LeadDetail>;
   updateLeadOutcomeAck(input: UpdateLeadOutcomeRecordInput): Promise<LeadSaveAck>;
   transferLead(input: TransferLeadRecordInput): Promise<LeadDetail>;
   listDueFollowUpAlerts(dataScope: DataScope, userId: string, now: Date): Promise<FollowUpAlert[]>;
   snoozeFollowUp(input: SnoozeFollowUpRecordInput): Promise<FollowUpAlert>;
   holdFollowUpForHandling(input: HoldFollowUpRecordInput): Promise<FollowUpAlert>;
+  deleteRawLeads(input: DeleteRawLeadsRecordInput): Promise<DeleteRawLeadsResult>;
 }
 
 export class DuplicatePhoneConflictError extends Error {
@@ -152,36 +156,37 @@ export class InMemoryLeadRepository implements LeadRepository {
     return { customer, lead, activity };
   }
 
-  async listRawLeads(dataScope: DataScope): Promise<RawLeadListItem[]> {
-    return this.listLeadsByQueue(dataScope, "RAW");
+  async listRawLeads(dataScope: DataScope, access: LeadAccessScope | null = null): Promise<RawLeadListItem[]> {
+    return this.listLeadsByQueue(dataScope, "RAW", access);
   }
 
-  async listLeadsByQueue(dataScope: DataScope, queue: LeadQueue): Promise<RawLeadListItem[]> {
+  async listLeadsByQueue(dataScope: DataScope, queue: LeadQueue, access: LeadAccessScope | null = null): Promise<RawLeadListItem[]> {
     return Array.from(this.leads.values())
       .filter((lead) => lead.dataScope === dataScope)
+      .filter((lead) => this.canAccessLead(lead.id, access))
       .filter((lead) => this.isLeadInQueue(lead, queue))
       .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
       .map((lead) => this.toRawLeadListItem(lead));
   }
 
-  async getQueueCounts(dataScope: DataScope): Promise<QueueCounts> {
+  async getQueueCounts(dataScope: DataScope, access: LeadAccessScope | null = null): Promise<QueueCounts> {
     return {
-      RAW: (await this.listLeadsByQueue(dataScope, "RAW")).length,
-      WARM: (await this.listLeadsByQueue(dataScope, "WARM")).length,
-      HOT_INSTALLATION: (await this.listLeadsByQueue(dataScope, "HOT_INSTALLATION")).length,
-      HOT_REPAIR_SERVICE: (await this.listLeadsByQueue(dataScope, "HOT_REPAIR_SERVICE")).length,
-      UNANSWERED: (await this.listLeadsByQueue(dataScope, "UNANSWERED")).length,
-      GHOSTING: (await this.listLeadsByQueue(dataScope, "GHOSTING")).length,
-      WON: (await this.listLeadsByQueue(dataScope, "WON")).length,
-      LOST: (await this.listLeadsByQueue(dataScope, "LOST")).length,
-      ARCHIVE: (await this.listLeadsByQueue(dataScope, "ARCHIVE")).length,
+      RAW: (await this.listLeadsByQueue(dataScope, "RAW", access)).length,
+      WARM: (await this.listLeadsByQueue(dataScope, "WARM", access)).length,
+      HOT_INSTALLATION: (await this.listLeadsByQueue(dataScope, "HOT_INSTALLATION", access)).length,
+      HOT_REPAIR_SERVICE: (await this.listLeadsByQueue(dataScope, "HOT_REPAIR_SERVICE", access)).length,
+      UNANSWERED: (await this.listLeadsByQueue(dataScope, "UNANSWERED", access)).length,
+      GHOSTING: (await this.listLeadsByQueue(dataScope, "GHOSTING", access)).length,
+      WON: (await this.listLeadsByQueue(dataScope, "WON", access)).length,
+      LOST: (await this.listLeadsByQueue(dataScope, "LOST", access)).length,
+      ARCHIVE: (await this.listLeadsByQueue(dataScope, "ARCHIVE", access)).length,
     };
   }
 
-  async getLeadDetail(dataScope: DataScope, leadId: string): Promise<LeadDetail | null> {
+  async getLeadDetail(dataScope: DataScope, leadId: string, access: LeadAccessScope | null = null): Promise<LeadDetail | null> {
     const lead = this.leads.get(leadId);
 
-    if (!lead || lead.dataScope !== dataScope) {
+    if (!lead || lead.dataScope !== dataScope || !this.canAccessLead(lead.id, access)) {
       return null;
     }
 
@@ -200,6 +205,7 @@ export class InMemoryLeadRepository implements LeadRepository {
         id: activity.id,
         type: activity.type,
         summary: activity.summary,
+        createdByName: null,
         createdAt: activity.createdAt,
       })),
       firstCallOutcomeOptions: ["SPOKE", "WARM", "NOT_INTERESTED", "WRONG_NUMBER", "NOT_RECEIVING"],
@@ -210,10 +216,10 @@ export class InMemoryLeadRepository implements LeadRepository {
     };
   }
 
-  async getLeadWorkflowState(dataScope: DataScope, leadId: string): Promise<LeadWorkflowState | null> {
+  async getLeadWorkflowState(dataScope: DataScope, leadId: string, access: LeadAccessScope | null = null): Promise<LeadWorkflowState | null> {
     const lead = this.leads.get(leadId);
 
-    if (!lead || lead.dataScope !== dataScope) {
+    if (!lead || lead.dataScope !== dataScope || !this.canAccessLead(lead.id, access)) {
       return null;
     }
 
@@ -452,6 +458,52 @@ export class InMemoryLeadRepository implements LeadRepository {
     return alert;
   }
 
+  async deleteRawLeads(input: DeleteRawLeadsRecordInput): Promise<DeleteRawLeadsResult> {
+    const requestedIds = new Set(input.leadIds);
+    const targets = Array.from(this.leads.values()).filter((lead) => {
+      if (lead.dataScope !== input.dataScope || lead.currentStage !== "RAW_UNTOUCHED" || lead.isArchived) {
+        return false;
+      }
+
+      if (!this.canAccessLead(lead.id, input.access)) {
+        return false;
+      }
+
+      return input.deleteAllRaw || requestedIds.has(lead.id);
+    });
+
+    const deletedLeadIds = targets.map((lead) => lead.id);
+    const deletedCustomerIds = targets.map((lead) => lead.customerId);
+
+    for (const lead of targets) {
+      const customer = this.customers.get(lead.customerId);
+
+      if (customer) {
+        this.phoneIndex.delete(this.scopedPhoneKey(input.dataScope, customer.primaryPhoneNormalized));
+      }
+
+      this.leads.delete(lead.id);
+      this.customers.delete(lead.customerId);
+      this.activities.delete(lead.id);
+      this.followUps.forEach((followUp, followUpId) => {
+        if (followUp.leadId === lead.id) {
+          this.followUps.delete(followUpId);
+        }
+      });
+      this.leadAssignees.delete(lead.id);
+      this.leadQuotations.delete(lead.id);
+      this.wonDetails.delete(lead.id);
+    }
+
+    return {
+      mode: input.deleteAllRaw ? "allRaw" : "selected",
+      deletedCount: deletedLeadIds.length,
+      skippedCount: input.deleteAllRaw ? 0 : Math.max(0, input.leadIds.length - deletedLeadIds.length),
+      deletedLeadIds,
+      deletedCustomerIds,
+    };
+  }
+
   seedExistingPhone(record: ExistingPhoneRecord): void {
     this.phoneIndex.set(this.scopedPhoneKey(record.dataScope, record.phoneNormalized), record);
   }
@@ -526,6 +578,14 @@ export class InMemoryLeadRepository implements LeadRepository {
         createdAt: now,
       },
     ]);
+  }
+
+  private canAccessLead(leadId: string, access: LeadAccessScope | null | undefined): boolean {
+    if (!access || access.canViewAllLeads) {
+      return true;
+    }
+
+    return this.leadAssignees.get(leadId) === access.actorId;
   }
 
   private toFollowUpAlert(followUp: InMemoryFollowUp): FollowUpAlert | null {

@@ -10,6 +10,7 @@ import {
 import {
   type CallOutcome,
   type CreateLeadOutcome,
+  type DeleteRawLeadsResult,
   type FollowUpReason,
   type FollowUpAlert,
   type ExistingPhoneRecord,
@@ -18,6 +19,7 @@ import {
   type ImportPreviewRow,
   type ImportPreviewRowInput,
   type ImportPreviewStatus,
+  type LeadAccessScope,
   type LeadDetail,
   type LeadPriority,
   type LeadQueue,
@@ -107,6 +109,24 @@ const snoozeFollowUpSchema = z.object({
 });
 
 export type SnoozeFollowUpInput = z.input<typeof snoozeFollowUpSchema>;
+const deleteRawLeadsSchema = z
+  .object({
+    leadIds: z.array(z.string().trim().min(1)).max(500, "Delete selected is limited to 500 leads at a time.").optional(),
+    deleteAllRaw: z.boolean().optional(),
+  })
+  .superRefine((value, context) => {
+    const hasSelectedIds = Boolean(value.leadIds?.length);
+
+    if (!value.deleteAllRaw && !hasSelectedIds) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Select at least one raw lead to delete.",
+        path: ["leadIds"],
+      });
+    }
+  });
+
+export type DeleteRawLeadsInput = z.input<typeof deleteRawLeadsSchema>;
 type SaveMode = "detail" | "ack";
 type SaveCallOutcomeResult = LeadDetail | LeadSaveAck;
 
@@ -168,24 +188,37 @@ export class LeadIntakeService {
     }
   }
 
-  async listRawLeads(dataScope: DataScope): Promise<RawLeadListItem[]> {
-    return this.leadRepository.listRawLeads(dataScope);
+  async listRawLeads(dataScope: DataScope, access: LeadAccessScope | null = null): Promise<RawLeadListItem[]> {
+    return this.leadRepository.listRawLeads(dataScope, access);
   }
 
-  async listLeadsByQueue(dataScope: DataScope, queue: LeadQueue): Promise<RawLeadListItem[]> {
-    return this.leadRepository.listLeadsByQueue(dataScope, queue);
+  async listLeadsByQueue(dataScope: DataScope, queue: LeadQueue, access: LeadAccessScope | null = null): Promise<RawLeadListItem[]> {
+    return this.leadRepository.listLeadsByQueue(dataScope, queue, access);
   }
 
-  async getQueueCounts(dataScope: DataScope): Promise<QueueCounts> {
-    return this.leadRepository.getQueueCounts(dataScope);
+  async getQueueCounts(dataScope: DataScope, access: LeadAccessScope | null = null): Promise<QueueCounts> {
+    return this.leadRepository.getQueueCounts(dataScope, access);
   }
 
-  async getLeadDetail(dataScope: DataScope, leadId: string): Promise<LeadDetail | null> {
-    return this.leadRepository.getLeadDetail(dataScope, leadId);
+  async getLeadDetail(dataScope: DataScope, leadId: string, access: LeadAccessScope | null = null): Promise<LeadDetail | null> {
+    return this.leadRepository.getLeadDetail(dataScope, leadId, access);
   }
 
-  async saveCallOutcome(dataScope: DataScope, leadId: string, input: SaveCallOutcomeInput, actorId: string | null = null): Promise<LeadDetail> {
-    const lead = await this.getLeadDetail(dataScope, leadId);
+  async deleteRawLeads(dataScope: DataScope, input: DeleteRawLeadsInput, actorId: string | null, access: LeadAccessScope | null = null): Promise<DeleteRawLeadsResult> {
+    const parsed = deleteRawLeadsSchema.parse(input);
+
+    return this.leadRepository.deleteRawLeads({
+      dataScope,
+      leadIds: parsed.leadIds ?? [],
+      deleteAllRaw: parsed.deleteAllRaw === true,
+      actorId,
+      access,
+      now: new Date(),
+    });
+  }
+
+  async saveCallOutcome(dataScope: DataScope, leadId: string, input: SaveCallOutcomeInput, actorId: string | null = null, access: LeadAccessScope | null = null): Promise<LeadDetail> {
+    const lead = await this.getLeadDetail(dataScope, leadId, access);
 
     if (!lead) {
       throw new LeadValidationError("Lead was not found.", "LEAD_NOT_FOUND");
@@ -194,8 +227,8 @@ export class LeadIntakeService {
     return this.saveCallOutcomeForLead(lead, input, "detail", actorId) as Promise<LeadDetail>;
   }
 
-  async saveCallOutcomeAck(dataScope: DataScope, leadId: string, input: SaveCallOutcomeInput, actorId: string | null = null): Promise<LeadSaveAck> {
-    const lead = await this.leadRepository.getLeadWorkflowState(dataScope, leadId);
+  async saveCallOutcomeAck(dataScope: DataScope, leadId: string, input: SaveCallOutcomeInput, actorId: string | null = null, access: LeadAccessScope | null = null): Promise<LeadSaveAck> {
+    const lead = await this.leadRepository.getLeadWorkflowState(dataScope, leadId, access);
 
     if (!lead) {
       throw new LeadValidationError("Lead was not found.", "LEAD_NOT_FOUND");
@@ -204,10 +237,15 @@ export class LeadIntakeService {
     return this.saveCallOutcomeForLead(lead, input, "ack", actorId) as Promise<LeadSaveAck>;
   }
 
-  async transferLead(dataScope: DataScope, leadId: string, input: TransferLeadInput, fromUserId: string): Promise<LeadDetail> {
+  async transferLead(dataScope: DataScope, leadId: string, input: TransferLeadInput, fromUserId: string, access: LeadAccessScope | null = null): Promise<LeadDetail> {
     const parsed = transferLeadSchema.parse(input);
     const now = new Date();
     const followUpAt = parsed.followUpAt ? parseRequiredDate(parsed.followUpAt, "Transfer follow-up date/time is invalid.") : now;
+    const lead = await this.leadRepository.getLeadWorkflowState(dataScope, leadId, access);
+
+    if (!lead) {
+      throw new LeadValidationError("Lead was not found for this user.", "LEAD_NOT_FOUND");
+    }
 
     return this.leadRepository.transferLead({
       dataScope,

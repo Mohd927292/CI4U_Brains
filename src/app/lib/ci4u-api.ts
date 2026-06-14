@@ -254,6 +254,7 @@ export type LeadDetail = RawLeadListItem & {
     id: string;
     type: string;
     summary: string;
+    createdByName: string | null;
     createdAt: string;
   }>;
   firstCallOutcomeOptions: string[];
@@ -263,6 +264,14 @@ export type LeadDetail = RawLeadListItem & {
 export type LeadQueue = "RAW" | "WARM" | "HOT_INSTALLATION" | "HOT_REPAIR_SERVICE" | "UNANSWERED" | "GHOSTING" | "WON" | "LOST" | "ARCHIVE";
 
 export type QueueCounts = Record<LeadQueue, number>;
+
+export type DeleteRawLeadsResult = {
+  mode: "selected" | "allRaw";
+  deletedCount: number;
+  skippedCount: number;
+  deletedLeadIds: string[];
+  deletedCustomerIds: string[];
+};
 
 export type QuotationSnapshot = {
   id: string;

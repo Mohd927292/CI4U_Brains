@@ -256,6 +256,7 @@ export type LeadDetail = LeadWorkflowState & {
     id: string;
     type: LeadActivityType;
     summary: string;
+    createdByName: string | null;
     createdAt: Date;
   }>;
   firstCallOutcomeOptions: CallOutcome[];
@@ -263,6 +264,11 @@ export type LeadDetail = LeadWorkflowState & {
 };
 
 export type QueueCounts = Record<LeadQueue, number>;
+
+export type LeadAccessScope = {
+  actorId: string;
+  canViewAllLeads: boolean;
+};
 
 export type CreateLeadRecordInput = {
   dataScope: DataScope;
@@ -340,6 +346,23 @@ export type HoldFollowUpRecordInput = {
   userId: string;
   holdMinutes: number;
   now: Date;
+};
+
+export type DeleteRawLeadsRecordInput = {
+  dataScope: DataScope;
+  leadIds: string[];
+  deleteAllRaw: boolean;
+  actorId: string | null;
+  access: LeadAccessScope | null;
+  now: Date;
+};
+
+export type DeleteRawLeadsResult = {
+  mode: "selected" | "allRaw";
+  deletedCount: number;
+  skippedCount: number;
+  deletedLeadIds: string[];
+  deletedCustomerIds: string[];
 };
 
 export type PersistedQuotationInput = {

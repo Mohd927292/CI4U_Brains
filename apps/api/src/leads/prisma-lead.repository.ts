@@ -24,9 +24,12 @@ import {
 import {
   type CreateLeadRecordInput,
   type CreateLeadRecordResult,
+  type DeleteRawLeadsRecordInput,
+  type DeleteRawLeadsResult,
   type ExistingPhoneRecord,
   type FollowUpAlert,
   type HoldFollowUpRecordInput,
+  type LeadAccessScope,
   type LeadDetail,
   type LeadQueue,
   type LeadSaveAck,
@@ -45,9 +48,13 @@ import { DuplicatePhoneConflictError, type LeadRepository } from "./lead.reposit
 type LeadWithCustomer = DbLead & {
   customer: DbCustomer;
   assignedTo?: { name: string } | null;
-  activities?: DbLeadActivity[];
+  activities?: LeadActivityWithCreator[];
   quotations?: QuotationWithPackages[];
   wonDetails?: DbWonLeadDetails | null;
+};
+
+type LeadActivityWithCreator = DbLeadActivity & {
+  createdBy?: { name: string } | null;
 };
 
 type QuotationWithPackages = DbLeadQuotation & {
@@ -70,7 +77,7 @@ type PhoneIndexWithRelations = DbPhoneIndex & {
   customer: DbCustomer;
   currentLead?: (DbLead & {
     assignedTo?: { name: string } | null;
-    activities?: DbLeadActivity[];
+    activities?: LeadActivityWithCreator[];
   }) | null;
 };
 
@@ -78,7 +85,7 @@ type FollowUpWithLead = DbFollowUp & {
   lead: DbLead & {
     customer: DbCustomer;
     assignedTo?: { name: string } | null;
-    activities?: DbLeadActivity[];
+    activities?: LeadActivityWithCreator[];
   };
 };
 
@@ -263,13 +270,13 @@ export class PrismaLeadRepository implements LeadRepository {
     };
   }
 
-  async listRawLeads(dataScope: DataScope): Promise<RawLeadListItem[]> {
-    return this.listLeadsByQueue(dataScope, "RAW");
+  async listRawLeads(dataScope: DataScope, access: LeadAccessScope | null = null): Promise<RawLeadListItem[]> {
+    return this.listLeadsByQueue(dataScope, "RAW", access);
   }
 
-  async listLeadsByQueue(dataScope: DataScope, queue: LeadQueue): Promise<RawLeadListItem[]> {
+  async listLeadsByQueue(dataScope: DataScope, queue: LeadQueue, access: LeadAccessScope | null = null): Promise<RawLeadListItem[]> {
     const leads = await this.prisma.lead.findMany({
-      where: this.whereForQueue(dataScope, queue),
+      where: this.whereForQueue(dataScope, queue, access),
       include: {
         customer: true,
         assignedTo: { select: { name: true } },
@@ -281,17 +288,17 @@ export class PrismaLeadRepository implements LeadRepository {
     return leads.map((lead) => this.toRawLeadListItem(lead as LeadWithCustomer));
   }
 
-  async getQueueCounts(dataScope: DataScope): Promise<QueueCounts> {
+  async getQueueCounts(dataScope: DataScope, access: LeadAccessScope | null = null): Promise<QueueCounts> {
     const [raw, warm, hotInstallation, hotRepairService, unanswered, ghosting, won, lost, archive] = await Promise.all([
-      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "RAW") }),
-      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "WARM") }),
-      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "HOT_INSTALLATION") }),
-      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "HOT_REPAIR_SERVICE") }),
-      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "UNANSWERED") }),
-      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "GHOSTING") }),
-      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "WON") }),
-      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "LOST") }),
-      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "ARCHIVE") }),
+      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "RAW", access) }),
+      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "WARM", access) }),
+      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "HOT_INSTALLATION", access) }),
+      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "HOT_REPAIR_SERVICE", access) }),
+      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "UNANSWERED", access) }),
+      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "GHOSTING", access) }),
+      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "WON", access) }),
+      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "LOST", access) }),
+      this.prisma.lead.count({ where: this.whereForQueue(dataScope, "ARCHIVE", access) }),
     ]);
 
     return {
@@ -307,9 +314,156 @@ export class PrismaLeadRepository implements LeadRepository {
     };
   }
 
-  async getLeadWorkflowState(dataScope: DataScope, leadId: string): Promise<LeadWorkflowState | null> {
-    const lead = await this.prisma.lead.findUnique({
-      where: { id: leadId },
+  async deleteRawLeads(input: DeleteRawLeadsRecordInput): Promise<DeleteRawLeadsResult> {
+    const dbScope = toDbDataScope(input.dataScope);
+    const result = await this.prisma.$transaction(async (tx) => {
+      const requestedIds = Array.from(new Set(input.leadIds));
+      const targets = await tx.lead.findMany({
+        where: {
+          dataScope: dbScope,
+          currentStage: "RAW_UNTOUCHED",
+          isArchived: false,
+          ...this.whereForLeadAccess(input.access),
+          ...(input.deleteAllRaw ? {} : { id: { in: requestedIds } }),
+        },
+        select: {
+          id: true,
+          customerId: true,
+        },
+      });
+
+      if (!targets.length) {
+        return {
+          deletedLeadIds: [],
+          deletedCustomerIds: [],
+          skippedCount: input.deleteAllRaw ? 0 : requestedIds.length,
+        };
+      }
+
+      const targetLeadIds = targets.map((lead) => lead.id);
+      const targetCustomerIds = Array.from(new Set(targets.map((lead) => lead.customerId)));
+      const protectedJobLeadIds = new Set(
+        (
+          await tx.job.findMany({
+            where: { leadId: { in: targetLeadIds } },
+            select: { leadId: true },
+          })
+        ).map((job) => job.leadId),
+      );
+      const safeLeadIds = targetLeadIds.filter((leadId) => !protectedJobLeadIds.has(leadId));
+      const safeCustomerIds = Array.from(new Set(targets.filter((lead) => safeLeadIds.includes(lead.id)).map((lead) => lead.customerId)));
+
+      if (!safeLeadIds.length) {
+        return {
+          deletedLeadIds: [],
+          deletedCustomerIds: [],
+          skippedCount: input.deleteAllRaw ? targetLeadIds.length : Math.max(0, requestedIds.length),
+        };
+      }
+
+      await tx.importRow.updateMany({
+        where: { leadId: { in: safeLeadIds } },
+        data: { leadId: null },
+      });
+      await tx.staffActivityEvent.updateMany({
+        where: { leadId: { in: safeLeadIds } },
+        data: { leadId: null },
+      });
+      await tx.wonLeadDetails.deleteMany({ where: { leadId: { in: safeLeadIds } } });
+      await tx.leadQuotation.deleteMany({ where: { leadId: { in: safeLeadIds } } });
+      await tx.whatsAppMessage.deleteMany({ where: { leadId: { in: safeLeadIds } } });
+      await tx.followUp.deleteMany({ where: { leadId: { in: safeLeadIds } } });
+      await tx.archiveRecord.deleteMany({ where: { leadId: { in: safeLeadIds } } });
+      await tx.leadActivity.deleteMany({ where: { leadId: { in: safeLeadIds } } });
+      await tx.phoneIndex.updateMany({
+        where: { currentLeadId: { in: safeLeadIds } },
+        data: {
+          currentLeadId: null,
+          currentStage: "RAW_UNTOUCHED",
+          isActive: false,
+          isArchived: false,
+        },
+      });
+      await tx.lead.deleteMany({ where: { id: { in: safeLeadIds } } });
+
+      const remainingLeadCustomerIds = new Set(
+        (
+          await tx.lead.findMany({
+            where: { customerId: { in: safeCustomerIds } },
+            select: { customerId: true },
+          })
+        ).map((lead) => lead.customerId),
+      );
+      const jobCustomerIds = new Set(
+        (
+          await tx.job.findMany({
+            where: { customerId: { in: safeCustomerIds } },
+            select: { customerId: true },
+          })
+        ).map((job) => job.customerId),
+      );
+      const certificateCustomerIds = new Set(
+        (
+          await tx.workCertificate.findMany({
+            where: { customerId: { in: safeCustomerIds } },
+            select: { customerId: true },
+          })
+        ).map((certificate) => certificate.customerId),
+      );
+      const deletableCustomerIds = safeCustomerIds.filter(
+        (customerId) => !remainingLeadCustomerIds.has(customerId) && !jobCustomerIds.has(customerId) && !certificateCustomerIds.has(customerId),
+      );
+
+      if (deletableCustomerIds.length) {
+        await tx.phoneIndex.deleteMany({ where: { customerId: { in: deletableCustomerIds } } });
+        await tx.customer.deleteMany({ where: { id: { in: deletableCustomerIds } } });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          dataScope: dbScope,
+          actorId: input.actorId,
+          action: "RAW_LEADS_DELETED",
+          entityType: "Lead",
+          entityId: input.deleteAllRaw ? "ALL_RAW" : safeLeadIds.slice(0, 5).join(","),
+          before: {
+            leadIds: safeLeadIds,
+            customerIds: safeCustomerIds,
+          },
+          after: Prisma.JsonNull,
+          metadata: {
+            mode: input.deleteAllRaw ? "allRaw" : "selected",
+            requestedCount: input.deleteAllRaw ? "ALL_RAW" : requestedIds.length,
+            deletedCount: safeLeadIds.length,
+            skippedCount: input.deleteAllRaw ? targetLeadIds.length - safeLeadIds.length : Math.max(0, requestedIds.length - safeLeadIds.length),
+          },
+          createdAt: input.now,
+        },
+      });
+
+      return {
+        deletedLeadIds: safeLeadIds,
+        deletedCustomerIds: deletableCustomerIds,
+        skippedCount: input.deleteAllRaw ? targetLeadIds.length - safeLeadIds.length : Math.max(0, requestedIds.length - safeLeadIds.length),
+      };
+    });
+
+    return {
+      mode: input.deleteAllRaw ? "allRaw" : "selected",
+      deletedCount: result.deletedLeadIds.length,
+      skippedCount: result.skippedCount,
+      deletedLeadIds: result.deletedLeadIds,
+      deletedCustomerIds: result.deletedCustomerIds,
+    };
+  }
+
+  async getLeadWorkflowState(dataScope: DataScope, leadId: string, access: LeadAccessScope | null = null): Promise<LeadWorkflowState | null> {
+    const lead = await this.prisma.lead.findFirst({
+      where: {
+        id: leadId,
+        dataScope: toDbDataScope(dataScope),
+        ...this.whereForLeadAccess(access),
+      },
       include: {
         customer: true,
         assignedTo: { select: { name: true } },
@@ -317,36 +471,45 @@ export class PrismaLeadRepository implements LeadRepository {
       },
     });
 
-    return lead && lead.dataScope === toDbDataScope(dataScope) ? this.toLeadWorkflowState(lead as LeadWithCustomer) : null;
+    return lead ? this.toLeadWorkflowState(lead as LeadWithCustomer) : null;
   }
 
-  async getLeadDetail(dataScope: DataScope, leadId: string): Promise<LeadDetail | null> {
-    const [lead, quotationSuggestions] = await Promise.all([
-      this.prisma.lead.findUnique({
-        where: { id: leadId },
-        include: {
-          customer: true,
-          assignedTo: { select: { name: true } },
-          activities: { orderBy: { createdAt: "asc" } },
-          quotations: {
-            orderBy: { createdAt: "desc" },
-            take: 1,
-            include: {
-              packages: {
-                orderBy: { sortOrder: "asc" },
-                include: {
-                  items: { orderBy: { sortOrder: "asc" } },
-                },
+  async getLeadDetail(dataScope: DataScope, leadId: string, access: LeadAccessScope | null = null): Promise<LeadDetail | null> {
+    const lead = await this.prisma.lead.findFirst({
+      where: {
+        id: leadId,
+        dataScope: toDbDataScope(dataScope),
+        ...this.whereForLeadAccess(access),
+      },
+      include: {
+        customer: true,
+        assignedTo: { select: { name: true } },
+        activities: {
+          orderBy: { createdAt: "asc" },
+          include: { createdBy: { select: { name: true } } },
+        },
+        quotations: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          include: {
+            packages: {
+              orderBy: { sortOrder: "asc" },
+              include: {
+                items: { orderBy: { sortOrder: "asc" } },
               },
             },
           },
-          wonDetails: true,
         },
-      }),
-      this.getQuotationSuggestions(dataScope),
-    ]);
+        wonDetails: true,
+      },
+    });
 
-    return lead && lead.dataScope === toDbDataScope(dataScope) ? this.toLeadDetail(lead as LeadWithCustomer, quotationSuggestions) : null;
+    if (!lead) {
+      return null;
+    }
+
+    const quotationSuggestions = await this.getQuotationSuggestions(dataScope);
+    return this.toLeadDetail(lead as LeadWithCustomer, quotationSuggestions);
   }
 
   private async getQuotationSuggestions(dataScope: DataScope): Promise<QuotationSuggestion> {
@@ -1206,9 +1369,13 @@ export class PrismaLeadRepository implements LeadRepository {
     });
   }
 
-  private whereForQueue(dataScope: DataScope, queue: LeadQueue) {
+  private whereForQueue(dataScope: DataScope, queue: LeadQueue, access: LeadAccessScope | null = null) {
     if (queue === "ARCHIVE") {
-      return { dataScope: toDbDataScope(dataScope), isArchived: true };
+      return {
+        dataScope: toDbDataScope(dataScope),
+        isArchived: true,
+        ...this.whereForLeadAccess(access),
+      };
     }
 
     const stages: Record<Exclude<LeadQueue, "ARCHIVE">, DbLeadStage> = {
@@ -1226,7 +1393,16 @@ export class PrismaLeadRepository implements LeadRepository {
       dataScope: toDbDataScope(dataScope),
       isArchived: false,
       currentStage: stages[queue],
+      ...this.whereForLeadAccess(access),
     };
+  }
+
+  private whereForLeadAccess(access: LeadAccessScope | null | undefined): Prisma.LeadWhereInput {
+    if (!access || access.canViewAllLeads) {
+      return {};
+    }
+
+    return { assignedToId: access.actorId };
   }
 
   private toExistingPhoneRecord(phoneEntry: PhoneIndexWithRelations): ExistingPhoneRecord {
@@ -1393,6 +1569,7 @@ export class PrismaLeadRepository implements LeadRepository {
         id: activity.id,
         type: activity.type,
         summary: activity.summary ?? "",
+        createdByName: activity.createdBy?.name ?? null,
         createdAt: activity.createdAt,
       })),
       firstCallOutcomeOptions: ["SPOKE", "WARM", "NOT_INTERESTED", "WRONG_NUMBER", "NOT_RECEIVING"],

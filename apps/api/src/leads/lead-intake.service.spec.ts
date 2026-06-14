@@ -91,6 +91,49 @@ describe("LeadIntakeService", () => {
     expect(await service.listRawLeads("production")).toHaveLength(1);
   });
 
+  it("scopes queue lists, counts, details, and saves to the assigned user", async () => {
+    const repository = new InMemoryLeadRepository();
+    const service = new LeadIntakeService(repository);
+
+    const first = await service.createManualLead(dataScope, {
+      businessName: "Staff A Lead",
+      phone: "9123400001",
+      source: "MANUAL",
+      assignedToId: "staff-a",
+    });
+    const second = await service.createManualLead(dataScope, {
+      businessName: "Staff B Lead",
+      phone: "9123400002",
+      source: "MANUAL",
+      assignedToId: "staff-b",
+    });
+    const staffAAccess = { actorId: "staff-a", canViewAllLeads: false };
+    const managerAccess = { actorId: "manager", canViewAllLeads: true };
+
+    expect(first.outcome).toBe("created");
+    expect(second.outcome).toBe("created");
+
+    if (first.outcome === "created" && second.outcome === "created") {
+      expect(await service.listRawLeads(dataScope, staffAAccess)).toHaveLength(1);
+      expect((await service.listRawLeads(dataScope, staffAAccess))[0]?.customerName).toBe("Staff A Lead");
+      expect((await service.getQueueCounts(dataScope, staffAAccess)).RAW).toBe(1);
+      expect((await service.getQueueCounts(dataScope, managerAccess)).RAW).toBe(2);
+      expect(await service.getLeadDetail(dataScope, second.lead.id, staffAAccess)).toBeNull();
+
+      await expect(
+        service.saveCallOutcomeAck(
+          dataScope,
+          second.lead.id,
+          {
+            callOutcome: "WARM",
+          },
+          "staff-a",
+          staffAAccess,
+        ),
+      ).rejects.toThrow("Lead was not found");
+    }
+  });
+
   it("offers reactivation when the duplicate record is archived", async () => {
     const repository = new InMemoryLeadRepository();
     repository.seedExistingPhone(
@@ -166,6 +209,53 @@ describe("LeadIntakeService", () => {
       skippedRows: 2,
     });
     expect(await service.listRawLeads(dataScope)).toHaveLength(1);
+  });
+
+  it("deletes only untouched raw leads and releases their phone numbers", async () => {
+    const repository = new InMemoryLeadRepository();
+    const service = new LeadIntakeService(repository);
+
+    const first = await service.createManualLead(dataScope, {
+      businessName: "Delete Me",
+      phone: "9123456789",
+      source: "MANUAL",
+    });
+    const second = await service.createManualLead(dataScope, {
+      businessName: "Keep Warm",
+      phone: "9123456790",
+      source: "MANUAL",
+    });
+
+    expect(first.outcome).toBe("created");
+    expect(second.outcome).toBe("created");
+
+    if (first.outcome === "created" && second.outcome === "created") {
+      await service.saveCallOutcome(dataScope, second.lead.id, {
+        callOutcome: "WARM",
+        followUpAt: "2026-06-01T05:30:00.000Z",
+      });
+
+      const result = await service.deleteRawLeads(
+        dataScope,
+        {
+          leadIds: [first.lead.id, second.lead.id],
+        },
+        "manager_1",
+      );
+
+      expect(result.deletedLeadIds).toEqual([first.lead.id]);
+      expect(result.skippedCount).toBe(1);
+      expect(await service.listRawLeads(dataScope)).toHaveLength(0);
+      expect(await service.listLeadsByQueue(dataScope, "WARM")).toHaveLength(1);
+
+      const recreated = await service.createManualLead(dataScope, {
+        businessName: "Delete Me Recreated",
+        phone: "9123456789",
+        source: "MANUAL",
+      });
+
+      expect(recreated.outcome).toBe("created");
+    }
   });
 
   it("returns a raw lead detail with customer header data and first-call options", async () => {

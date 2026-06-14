@@ -427,6 +427,7 @@ model Lead {
   @@index([dataScope, currentStage, nextFollowUpAt])
   @@index([customerId, currentStage, isArchived])
   @@index([assignedToId, currentStage, nextFollowUpAt])
+  @@index([dataScope, assignedToId, isArchived, currentStage, updatedAt])
   @@map("leads")
 }
 
@@ -678,6 +679,7 @@ model VendorTeamMember {
   vendor Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
 
   @@index([dataScope, vendorId])
+  @@index([vendorId])
   @@map("vendor_team_members")
 }
 
@@ -717,6 +719,7 @@ model Job {
   @@index([dataScope, status, scheduledAt])
   @@index([dataScope, assignedVendorId, status])
   @@index([customerId])
+  @@index([assignedVendorId])
   @@map("jobs")
 }
 
@@ -738,6 +741,7 @@ model VendorOffer {
   @@unique([jobId, vendorId])
   @@index([dataScope, vendorId, status])
   @@index([jobId])
+  @@index([vendorId])
   @@map("vendor_offers")
 }
 
@@ -856,6 +860,8 @@ model StaffActivityEvent {
   @@index([dataScope, userId, occurredAt])
   @@index([dataScope, type, occurredAt])
   @@index([dataScope, targetUserId, occurredAt])
+  @@index([userId])
+  @@index([targetUserId])
   @@index([leadId])
   @@index([customerId])
   @@index([jobId])

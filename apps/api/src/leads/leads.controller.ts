@@ -1,10 +1,10 @@
-import { BadRequestException, Body, Controller, Get, Inject, NotFoundException, Param, Post, Req } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Inject, NotFoundException, Param, Post, Req } from "@nestjs/common";
 import type { Request } from "express";
 import { ZodError } from "zod";
 import type { SessionUser } from "../auth/auth.service";
 import { AuthService, AuthWorkflowError } from "../auth/auth.service";
-import { LeadIntakeService, LeadValidationError, type CreateLeadInput, type SaveCallOutcomeInput, type SnoozeFollowUpInput, type TransferLeadInput } from "./lead-intake.service";
-import { type ImportPreviewRowInput, type LeadQueue } from "./lead.types";
+import { LeadIntakeService, LeadValidationError, type CreateLeadInput, type DeleteRawLeadsInput, type SaveCallOutcomeInput, type SnoozeFollowUpInput, type TransferLeadInput } from "./lead-intake.service";
+import { type ImportPreviewRowInput, type LeadAccessScope, type LeadQueue } from "./lead.types";
 
 @Controller("leads")
 export class LeadsController {
@@ -17,14 +17,14 @@ export class LeadsController {
   async listRawLeads(@Req() req: Request) {
     const actor = await this.requireActor(req);
     this.authService.assertPermission(actor, "WORK_ON_LEADS");
-    return this.leadIntakeService.listRawLeads(actor.dataScope);
+    return this.leadIntakeService.listRawLeads(actor.dataScope, toLeadAccess(actor));
   }
 
   @Get("counts")
   async getQueueCounts(@Req() req: Request) {
     const actor = await this.requireActor(req);
     this.authService.assertPermission(actor, "WORK_ON_LEADS");
-    return this.leadIntakeService.getQueueCounts(actor.dataScope);
+    return this.leadIntakeService.getQueueCounts(actor.dataScope, toLeadAccess(actor));
   }
 
   @Get("queue/:queue")
@@ -38,7 +38,7 @@ export class LeadsController {
 
     const actor = await this.requireActor(req);
     this.authService.assertPermission(actor, "WORK_ON_LEADS");
-    return this.leadIntakeService.listLeadsByQueue(actor.dataScope, queue);
+    return this.leadIntakeService.listLeadsByQueue(actor.dataScope, queue, toLeadAccess(actor));
   }
 
   @Get("follow-up-alerts")
@@ -46,6 +46,17 @@ export class LeadsController {
     const actor = await this.requireActor(req);
     this.authService.assertPermission(actor, "WORK_ON_LEADS");
     return this.leadIntakeService.listDueFollowUpAlerts(actor.dataScope, actor.id);
+  }
+
+  @Delete("raw")
+  async deleteRawLeads(@Req() req: Request, @Body() body: DeleteRawLeadsInput) {
+    try {
+      const actor = await this.requireActor(req);
+      this.authService.assertPermission(actor, "ADD_RAW_LEADS");
+      return await this.leadIntakeService.deleteRawLeads(actor.dataScope, body, actor.id, toLeadAccess(actor));
+    } catch (error) {
+      throw this.toBadRequest(error);
+    }
   }
 
   @Post("follow-up-alerts/:followUpId/snooze")
@@ -74,7 +85,7 @@ export class LeadsController {
   async getLeadDetail(@Req() req: Request, @Param("leadId") leadId: string) {
     const actor = await this.requireActor(req);
     this.authService.assertPermission(actor, "WORK_ON_LEADS");
-    const lead = await this.leadIntakeService.getLeadDetail(actor.dataScope, leadId);
+    const lead = await this.leadIntakeService.getLeadDetail(actor.dataScope, leadId, toLeadAccess(actor));
 
     if (!lead) {
       throw new NotFoundException({
@@ -106,7 +117,7 @@ export class LeadsController {
     try {
       const actor = await this.requireActor(req);
       this.authService.assertPermission(actor, "WORK_ON_LEADS");
-      return await this.leadIntakeService.saveCallOutcome(actor.dataScope, leadId, body, actor.id);
+      return await this.leadIntakeService.saveCallOutcome(actor.dataScope, leadId, body, actor.id, toLeadAccess(actor));
     } catch (error) {
       throw this.toBadRequest(error);
     }
@@ -117,7 +128,7 @@ export class LeadsController {
     try {
       const actor = await this.requireActor(req);
       this.authService.assertPermission(actor, "WORK_ON_LEADS");
-      return await this.leadIntakeService.saveCallOutcomeAck(actor.dataScope, leadId, body, actor.id);
+      return await this.leadIntakeService.saveCallOutcomeAck(actor.dataScope, leadId, body, actor.id, toLeadAccess(actor));
     } catch (error) {
       throw this.toBadRequest(error);
     }
@@ -128,7 +139,7 @@ export class LeadsController {
     try {
       const actor = await this.requireActor(req);
       this.authService.assertPermission(actor, "TRANSFER_LEADS");
-      return await this.leadIntakeService.transferLead(actor.dataScope, leadId, body, actor.id);
+      return await this.leadIntakeService.transferLead(actor.dataScope, leadId, body, actor.id, toLeadAccess(actor));
     } catch (error) {
       throw this.toBadRequest(error);
     }
@@ -171,7 +182,9 @@ export class LeadsController {
   }
 
   private requireActor(req: Request): Promise<SessionUser> {
-    return this.authService.getCurrentUser(requireUser(req));
+    return this.authService.getCurrentUser(requireUser(req)).catch((error) => {
+      throw this.toBadRequest(error);
+    });
   }
 
   private toBadRequest(error: unknown): BadRequestException {
@@ -209,4 +222,11 @@ function requireUser(req: Request) {
   }
 
   return req.user;
+}
+
+function toLeadAccess(actor: SessionUser): LeadAccessScope {
+  return {
+    actorId: actor.id,
+    canViewAllLeads: actor.role === "FOUNDER" || actor.role === "SUPER_ADMIN" || actor.permissions.includes("SUPERVISOR"),
+  };
 }

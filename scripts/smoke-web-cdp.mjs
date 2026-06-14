@@ -440,23 +440,42 @@ async function setLeadCallUpdate(page, update) {
   await evaluate(
     page,
     `(() => {
+      const findField = (labelText, selector) => {
+        const labels = Array.from(document.querySelectorAll("label"));
+        const label = labels.find((candidate) => candidate.innerText.toLowerCase().includes(labelText.toLowerCase()));
+        if (!label) {
+          throw new Error("Could not find field label: " + labelText);
+        }
+        const field = label.querySelector(selector);
+        if (!field) {
+          throw new Error("Could not find field control for label: " + labelText);
+        }
+        return field;
+      };
       const setSelect = (select, value) => {
         select.value = value;
         select.dispatchEvent(new Event("change", { bubbles: true }));
       };
-      const setTextarea = (textarea, value) => {
-        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
-        setter.call(textarea, value);
-        textarea.dispatchEvent(new Event("input", { bubbles: true }));
-      };
 
-      setSelect(document.querySelectorAll("select.field")[0], ${JSON.stringify(update.callOutcome)});
+      setSelect(findField("Call Outcome", "select.field"), ${JSON.stringify(update.callOutcome)});
       return new Promise((resolve) => setTimeout(resolve, 0));
     })()`,
   );
   await evaluate(
     page,
     `(() => {
+      const findField = (labelText, selector) => {
+        const labels = Array.from(document.querySelectorAll("label"));
+        const label = labels.find((candidate) => candidate.innerText.toLowerCase().includes(labelText.toLowerCase()));
+        if (!label) {
+          throw new Error("Could not find field label: " + labelText);
+        }
+        const field = label.querySelector(selector);
+        if (!field) {
+          throw new Error("Could not find field control for label: " + labelText);
+        }
+        return field;
+      };
       const setSelect = (select, value) => {
         select.value = value;
         select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -467,9 +486,9 @@ async function setLeadCallUpdate(page, update) {
         textarea.dispatchEvent(new Event("input", { bubbles: true }));
       };
 
-      setTextarea(document.querySelectorAll("textarea.field")[0], ${JSON.stringify(update.conversationSummary)});
+      setTextarea(findField("Conversation Summary", "textarea.field"), ${JSON.stringify(update.conversationSummary)});
       if (${JSON.stringify(Boolean(update.leadIntent))}) {
-        setSelect(document.querySelectorAll("select.field")[1], ${JSON.stringify(update.leadIntent ?? "")});
+        setSelect(findField("Lead Intent", "select.field"), ${JSON.stringify(update.leadIntent ?? "")});
       }
       return true;
     })()`,
